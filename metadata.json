@@ -1,0 +1,5 @@
+{
+  "name": "QMT Electron Terminal",
+  "description": "High-performance trading terminal connecting Electron to QMT Python API via binary IPC.",
+  "requestFramePermissions": []
+}

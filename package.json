@@ -1,0 +1,35 @@
+{
+  "name": "qmt-electron-terminal",
+  "private": true,
+  "version": "1.0.0",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "compile:electron": "tsc -p electron/tsconfig.json",
+    "electron": "npm run compile:electron && electron .",
+    "start": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"wait-on tcp:5173 && npm run electron\""
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "clsx": "^2.0.0",
+    "tailwind-merge": "^1.14.0",
+    "lucide-react": "^0.263.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.15",
+    "@types/react-dom": "^18.2.7",
+    "@types/node": "^20.4.5",
+    "@vitejs/plugin-react": "^4.0.3",
+    "electron": "^25.3.0",
+    "typescript": "^5.0.2",
+    "vite": "^4.4.5",
+    "autoprefixer": "^10.4.14",
+    "postcss": "^8.4.27",
+    "tailwindcss": "^3.3.3",
+    "concurrently": "^8.2.0",
+    "wait-on": "^7.0.1",
+    "cross-env": "^7.0.3"
+  }
+}
