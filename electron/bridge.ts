@@ -1,177 +1,250 @@
-import { EventEmitter } from 'events';
+import fs from 'fs';
 import net from 'net';
-import { Buffer } from 'buffer';
+import { EventEmitter } from 'events';
 import { Protocol } from './protocol';
 
-// Pipe Names defined by user
-const PIPE_REQUEST = '\\\\.\\pipe\\request_pipe';
-const PIPE_RESPONSE = '\\\\.\\pipe\\response_pipe';
-
-interface PendingRequest {
-  resolve: (data: any) => void;
-  reject: (err: any) => void;
-  timer: ReturnType<typeof setTimeout>;
-}
-
+/**
+ * 这是一个“大一统”的桥接类
+ * 它把之前的 RequestClient(发送), ResponseServer(接收), TransactionManager(事务), 
+ * InstructionSender, ResponseReceiver 全部合并在了一起。
+ * 
+ * 目的：让代码更简单，文件更少，逻辑更直观。
+ */
 export class PythonBridge extends EventEmitter {
-  private reqSocket: net.Socket | null = null;
+  // --- 管道配置 ---
+  private readonly PIPE_REQ = '\\\\.\\pipe\\request_pipe'; // 发送给Python
+  private readonly PIPE_RES = '\\\\.\\pipe\\response_pipe'; // 接收Python发来的
+
+  // --- 内部状态 ---
+  private reqStream: fs.WriteStream | null = null;
+  private resServer: net.Server | null = null;
   private resSocket: net.Socket | null = null;
 
-  private reqIdCounter = 1;
-  private pendingRequests = new Map<number, PendingRequest>();
-  private parseChunk: (chunk: Buffer) => void;
-
-  private isConnected = false;
+  private isReqConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // --- 事务管理 (Request-Response) ---
+  private reqIdCounter = 1;
+  private pendingRequests = new Map<number, { resolve: (data: any) => void; timer: ReturnType<typeof setTimeout> }>();
+
+  // --- 协议解析 ---
+  private parseChunk: (chunk: Buffer) => void;
 
   constructor() {
     super();
-    // Initialize the protocol parser
-    this.parseChunk = Protocol.createParser((msg) => {
-      this.handleMessage(msg);
-    });
-  }
-
-  public on(event: string, listener: (...args: any[]) => void): this {
-    return EventEmitter.prototype.on.call(this, event, listener) as this;
-  }
-
-  public emit(event: string, ...args: any[]): boolean {
-    return EventEmitter.prototype.emit.call(this, event, ...args);
-  }
-
-  start() {
-    this.connectPipes();
-  }
-
-  stop() {
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reqSocket?.destroy();
-    this.resSocket?.destroy();
-    this.isConnected = false;
-  }
-
-  private connectPipes() {
-    if (this.isConnected) return;
-
-    console.log(`[Bridge] Connecting to pipes...`);
-
-    const req = net.createConnection(PIPE_REQUEST);
-    const res = net.createConnection(PIPE_RESPONSE);
-
-    let connectedCount = 0;
-    const checkConnected = () => {
-      connectedCount++;
-      if (connectedCount === 2) {
-        this.isConnected = true;
-        this.reqSocket = req;
-        this.resSocket = res;
-        console.log("[Bridge] Pipes Connected Successfully.");
-        this.emit('log', "交易核心连接成功");
-      }
-    };
-
-    req.on('connect', checkConnected);
-    req.on('error', (err) => this.handleConnectionError(err, 'Request'));
-    req.on('close', () => this.handleDisconnect('Request'));
-
-    res.on('connect', checkConnected);
-    res.on('data', (chunk) => { this.parseChunk(chunk); });
-    res.on('error', (err) => this.handleConnectionError(err, 'Response'));
-    res.on('close', () => this.handleDisconnect('Response'));
-  }
-
-  private handleConnectionError(err: Error, type: string) {
-    console.error(`[Bridge] ${type} Pipe Error:`, err.message);
-    // Even if it failed to connect initially, we should trigger a cleanup and retry
-    this.handleDisconnect(type);
-  }
-
-  private handleDisconnect(type: string) {
-    if (this.reconnectTimer) return;
-
-    console.warn(`[Bridge] ${type} Pipe Disconnected or Connection Failed.`);
-    this.isConnected = false;
-    this.reqSocket?.destroy();
-    this.resSocket?.destroy();
-    this.reqSocket = null;
-    this.resSocket = null;
-
-    this.emit('log', "交易核心连接断开，3秒后重连...");
-    this.emit('error', "Backend Disconnected");
-
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = setTimeout(() => {
-      this.connectPipes();
-    }, 3000);
+    // 创建一个解析器，收到完整包后调用 this.handleMessage
+    this.parseChunk = Protocol.createParser((msg) => this.handleMessage(msg));
   }
 
   /**
-   * Send a request to Python via request_pipe
-   * Payload Structure matches Python: { action, req_id, params }
+   * 启动！
+   * 同时启动 发送端(Client) 和 接收端(Server)
    */
-  async sendRequest(action: string, params: any, timeout = 10000): Promise<any> {
-    if (!this.isConnected || !this.reqSocket) {
-      return { success: false, error: "核心未连接", code: "DISCONNECTED" };
-    }
+  public start() {
+    this.startResServer();
+    this.connectReqPipe();
+  }
 
+  /**
+   * 停止！释放所有资源
+   */
+  public stop() {
+    // 1. 清理发送端
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reqStream?.destroy();
+    this.reqStream = null;
+    this.isReqConnected = false;
+
+    // 2. 清理接收端
+    this.resSocket?.destroy();
+    this.resSocket = null;
+    this.resServer?.close();
+    this.resServer = null;
+
+    // 3. 拒绝所有挂起的请求
+    this.pendingRequests.forEach(({ resolve, timer }) => {
+      clearTimeout(timer);
+      resolve({ success: false, error: "Bridge stopped" });
+    });
+    this.pendingRequests.clear();
+  }
+
+
+  // ==========================================
+  // Part 1: 发送端逻辑 (原 RequestClient)
+  // ==========================================
+
+  private connectReqPipe() {
+    if (this.isReqConnected) return;
+
+    const stream = fs.createWriteStream(this.PIPE_REQ, { autoClose: true });
+
+    stream.on('open', () => {
+      this.reqStream = stream;
+      this.isReqConnected = true;
+      console.log(`[Bridge] Write-Pipe Connected: ${this.PIPE_REQ}`);
+      // this.checkLinkStatus();
+    });
+
+    stream.on('error', (err) => {
+      // console.error(`[Bridge] Write-Pipe Error: ${err.message}`);
+      this.handleReqDisconnect(err.message);
+    });
+
+    stream.on('close', () => {
+      this.handleReqDisconnect('Stream closed');
+    });
+  }
+
+  private handleReqDisconnect(reason: string) {
+    if (this.reconnectTimer) return; // 已经在重连中了
+
+    console.warn(`[Bridge] Write-Pipe Disconnected (${reason}). Retrying in 3s...`);
+    this.isReqConnected = false;
+    this.reqStream?.destroy();
+    this.reqStream = null;
+    // this.checkLinkStatus();
+
+    // 3秒后重试
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connectReqPipe();
+    }, 3000);
+  }
+
+  // ==========================================
+  // Part 2: 接收端逻辑 (原 ResponseServer)
+  // ==========================================
+
+  private startResServer() {
+    if (this.resServer) return;
+
+    this.resServer = net.createServer((socket) => {
+      // 只允许一个 Python 连接，挤掉旧的
+      if (this.resSocket) {
+        this.resSocket.destroy();
+      }
+
+      this.resSocket = socket;
+      // console.log(`[Bridge] Read-Pipe Client Connected!`);
+      // this.checkLinkStatus();
+
+      socket.on('data', (chunk) => {
+        this.parseChunk(chunk); // 喂给协议解析器
+      });
+
+      socket.on('error', (err) => {
+        console.error(`[Bridge] Read-Pipe Socket Error: ${err.message}`);
+      });
+
+      socket.on('close', () => {
+        // console.warn(`[Bridge] Read-Pipe Client Disconnected`);
+        this.resSocket = null;
+        // this.checkLinkStatus();
+      });
+    });
+
+    this.resServer.listen(this.PIPE_RES, () => {
+      console.log(`[Bridge] Listening on ${this.PIPE_RES}`);
+    });
+  }
+
+  // ==========================================
+  // Part 3: 核心逻辑 (原 TransactionManager)
+  // ==========================================
+
+  /**
+   * 发送请求并等待结果 (Request-Response)
+   */
+  public async sendRequest(action: string, params: any, timeout = 10000): Promise<any> {
     const reqId = this.reqIdCounter++;
+    const payload = { action, req_id: reqId, params };
 
-    // Construct Request Packet for RequestHandlerThread
-    const payload = {
-      action: action,
-      req_id: reqId,
-      params: params
-    };
-
-    const buffer = Protocol.encode(payload);
-
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
+      // 1. 设置超时
       const timer = setTimeout(() => {
         if (this.pendingRequests.has(reqId)) {
           this.pendingRequests.delete(reqId);
-          resolve({ success: false, error: "请求超时", code: "TIMEOUT" });
+          resolve({ success: false, error: "Timeout", code: "TIMEOUT" });
         }
       }, timeout);
 
-      this.pendingRequests.set(reqId, { resolve, reject, timer });
+      // 2. 只有管道通了才能发
+      if (!this.reqStream || !this.isReqConnected) {
+        clearTimeout(timer);
+        resolve({ success: false, error: "Pipe not ready", code: "PIPE_ERROR" });
+        return;
+      }
 
+      // 3. 记录到 Map 中
+      this.pendingRequests.set(reqId, { resolve, timer });
+
+      // 4. 写数据
       try {
-        this.reqSocket!.write(buffer);
+        const buffer = Protocol.encode(payload);
+        this.reqStream.write(buffer);
       } catch (e) {
         clearTimeout(timer);
         this.pendingRequests.delete(reqId);
-        resolve({ success: false, error: e instanceof Error ? e.message : String(e), code: "WRITE_ERROR" });
+        resolve({ success: false, error: "Write failed" });
       }
     });
   }
 
+  /**
+   * 仅发送通知，不等待结果 (Fire-and-Forget)
+   */
+  public sendNotify(action: string, params: any) {
+    if (!this.reqStream || !this.isReqConnected) return;
+    try {
+      // req_id = null 表示这是一个通知
+      const payload = { action, req_id: null, params };
+      this.reqStream.write(Protocol.encode(payload));
+    } catch (e) {
+      console.error("[Bridge] Send notify failed", e);
+    }
+  }
+
+  /**
+   * 处理从 Python 收到的完整消息
+   */
   private handleMessage(msg: any) {
-    console.log(`[Bridge] Parsed Message:`, msg);
-    // 1. Handle Request Responses (Matched by reqId)
-    // Note: The Python side might return keys like "req_id" or "reqId", adapt as needed.
-    // Based on previous prompt, we assume standard JSON msg.
+    // 情况 A: 这是一个对之前请求的回执 (有 req_id)
     const rId = msg.req_id !== undefined ? msg.req_id : msg.reqId;
+    if (rId && this.pendingRequests.has(Number(rId))) {
+      const { resolve, timer } = this.pendingRequests.get(Number(rId))!;
+      clearTimeout(timer);
+      this.pendingRequests.delete(Number(rId));
 
-    if (rId !== undefined && rId !== null) {
-      const req = this.pendingRequests.get(rId);
-      if (req) {
-        clearTimeout(req.timer);
-        this.pendingRequests.delete(rId);
-
-        if (msg.error) {
-          req.resolve({ success: false, error: msg.error });
-        } else {
-          // If response has 'data' field return that wrapped in success
-          const data = msg.data !== undefined ? msg.data : msg;
-          req.resolve({ success: true, data });
-        }
+      // 返回结果
+      if (msg.error) {
+        resolve({ success: false, error: msg.error });
+      } else {
+        const data = msg.data !== undefined ? msg.data : msg;
+        resolve({ success: true, data });
       }
       return;
     }
 
+    // 情况 B: 这是一个主动推送的事件 (Event)
     if (msg.event) {
       this.emit(msg.event, msg.data);
+      return;
     }
+
+    // 情况 C: 未知消息
+    // console.log("[Bridge] Unknown message:", msg);
   }
+
+  // private checkLinkStatus() {
+  //   const sendOk = this.isReqConnected;
+  //   const recvOk = !!this.resSocket;
+
+  //   // 简单的状态变更日志
+  //   // console.log(`[Bridge Status] SEND=${sendOk}, RECV=${recvOk}`);
+
+  //   if (sendOk && recvOk) {
+  //     this.emit('log', '通信链路就绪 (双向)');
+  //   }
+  // }
 }

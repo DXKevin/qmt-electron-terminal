@@ -7,7 +7,6 @@ export enum ActionType {
   QUERY_TRADES = 'query_trades',
   QUERY_POSITIONS = 'query_positions',
   QUERY_ASSETS = 'query_assets',
-  SUBSCRIBE = 'subscribe' // Assuming this exists elsewhere in Python
 }
 
 // QMT Specific Data Structures
@@ -34,11 +33,27 @@ export interface TickData {
   turnoverRate?: number;
 }
 
+export interface StockDetail {
+  symbol: string;
+  name: string;
+  upLimit: number;
+  downLimit: number;
+}
+
 export interface AccountInfo {
   accountId: string;
   assets: number;
   marketValue: number;
   cash: number;
+}
+
+export interface MultiAccountInfo {
+  account_id: string;
+  account_type: number;
+  broker_type: number;
+  platform_id: number;
+  account_classification: number;
+  login_status: number;
 }
 
 export interface Position {
@@ -75,6 +90,7 @@ export interface OrderRequest {
 
 export interface OrderStatus {
   orderId: string;
+  accountId: string;
   orderTime: string;
   symbol: string;
   stockName: string;
@@ -100,11 +116,16 @@ export interface IElectronAPI {
   getAccount: (accountId: string) => Promise<ApiResponse<AccountInfo>>;
   getPositions: (accountId: string) => Promise<ApiResponse<Position[]>>;
   getTrades: (accountId: string) => Promise<ApiResponse<Trade[]>>;
-  subscribe: (symbol: string) => Promise<ApiResponse<any>>;
+  cancelOrder: (accountId: string, orderId: string) => Promise<ApiResponse<any>>;
+  setFocusSymbol: (symbol: string) => void;
+  getTickSnapshot: (symbol: string) => Promise<TickData | null>;
 
-  onTick: (callback: (data: TickData) => void) => void;
-  onOrderUpdate: (callback: (data: OrderStatus) => void) => void;
-  onSystemLog: (callback: (msg: string) => void) => void;
+  onTick: (callback: (data: TickData) => void) => () => void;
+  onOrderUpdate: (callback: (data: OrderStatus) => void) => () => void;
+  onSystemLog: (callback: (msg: string) => void) => () => void;
+  onAccounts: (callback: (accounts: MultiAccountInfo[]) => void) => () => void;
+  onAssetsSnapshot: (callback: (assets: any[]) => void) => () => void;
+  getStockDetail: (symbol: string) => Promise<StockDetail | null>;
 
   // Window Controls
   minimizeWindow: () => Promise<void>;

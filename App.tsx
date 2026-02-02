@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { TickData, AccountInfo, OrderRequest, OrderStatus, Position, Trade } from './types';
+import { TickData, AccountInfo, OrderRequest, OrderStatus, Position, Trade, MultiAccountInfo } from './types';
 
 // ----------------------------------------------------------------------
 // TYPES & CONSTANTS
@@ -20,14 +20,8 @@ const STOCK_MAP: Record<string, string> = {
   '601888': '中国中免'
 };
 
-// Mock Accounts for Multi-Account Feature
-const MOCK_MULTI_ACCOUNTS = [
-  { id: '888001', name: '主策略账户', type: '普通', cash: 450000.50 },
-  { id: '888002', name: '激进打板', type: '信用', cash: 120000.00 },
-  { id: '888003', name: '稳健理财', type: '普通', cash: 890000.00 },
-  { id: '888005', name: '量化测试', type: '普通', cash: 50000.00 },
-  { id: '888006', name: '跟随策略A', type: '普通', cash: 200000.00 },
-];
+// Mock Accounts - To be connected to backend data
+const MOCK_MULTI_ACCOUNTS: any[] = [];
 
 // Updated Semantic Icons
 const Icons = {
@@ -89,7 +83,10 @@ export const App: React.FC = () => {
   const [isSidebarOpen, setSidebarOpen] = useState(true); // New Sidebar State
 
   // Multi-Account State
-  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>(['888001']);
+  const [multiAccounts, setMultiAccounts] = useState<MultiAccountInfo[]>([]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
+  const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
+  const [assetsMap, setAssetsMap] = useState<Record<string, AccountInfo>>({});
 
   // Trade Form State
   const [symbol, setSymbol] = useState('600000.SH');
@@ -112,17 +109,24 @@ export const App: React.FC = () => {
     setLogs(prev => [...prev.slice(-199), `[${new Date().toLocaleTimeString()}] ${msg}`]);
   }, []);
 
+  const isFirstMount = useRef(true);
+
   // Initialize listeners
   useEffect(() => {
-    window.electronAPI.onSystemLog((msg) => addLog(msg));
+    const unsubLog = window.electronAPI.onSystemLog((msg) => {
+      addLog(msg);
+      if (msg === "交易核心连接成功") {
+        fetchData();
+      }
+    });
 
-    window.electronAPI.onTick((data) => {
+    const unsubTick = window.electronAPI.onTick((data) => {
       setTicks(prev => {
         return [data];
       });
     });
 
-    window.electronAPI.onOrderUpdate((order) => {
+    const unsubOrder = window.electronAPI.onOrderUpdate((order) => {
       setOrders(prev => {
         const idx = prev.findIndex(o => o.orderId === order.orderId);
         if (idx >= 0) {
@@ -137,7 +141,50 @@ export const App: React.FC = () => {
       addLog(`委托更新: ${order.symbol} ${order.status}`);
     });
 
-    fetchData();
+    const unsubAccounts = window.electronAPI.onAccounts((accounts) => {
+      setMultiAccounts(accounts);
+      // Auto-select first account if none selected
+      setSelectedAccountIds(prev => prev.length === 0 && accounts.length > 0 ? [accounts[0].account_id] : prev);
+      addLog(`系统已加载 ${accounts.length} 个资金账户`);
+    });
+
+    const unsubAssetsSnapshot = window.electronAPI.onAssetsSnapshot((dataArray) => {
+      const updates: Record<string, AccountInfo> = {};
+      dataArray.forEach((raw: any) => {
+        const info: AccountInfo = {
+          accountId: raw.account_id,
+          assets: raw.total_asset || 0,
+          marketValue: raw.market_value || 0,
+          cash: raw.cash || 0
+        };
+        updates[info.accountId] = info;
+      });
+
+      setAssetsMap(prev => ({ ...prev, ...updates }));
+
+      // If the currently "active" account (first selected) is in this snapshot, update the main header
+      setSelectedAccountIds(currentSelected => {
+        const activeId = currentSelected[0];
+        if (activeId && updates[activeId]) {
+          setAccount(updates[activeId]);
+        }
+        return currentSelected;
+      });
+    });
+
+    if (isFirstMount.current) {
+      // fetchData(); // Removed initial call to prevent "Not Connected" errors
+      window.electronAPI.setFocusSymbol(symbol);
+      isFirstMount.current = false;
+    }
+
+    return () => {
+      unsubLog();
+      unsubTick();
+      unsubOrder();
+      unsubAccounts();
+      unsubAssetsSnapshot();
+    };
   }, [addLog]);
 
   // Scroll logs when on Logs tab
@@ -163,27 +210,36 @@ export const App: React.FC = () => {
 
 
   const fetchData = async () => {
+    if (multiAccounts.length === 0) return;
+
+    addLog(`正在同步 ${multiAccounts.length} 个账户的行情快照与持仓...`);
+
     try {
-      const queryId = selectedAccountIds.length > 0 ? selectedAccountIds[0] : '888001';
+      // 1. Batch Positions & Trades
+      const allPos: Position[] = [];
+      const allTrds: Trade[] = [];
 
-      const accRes = await window.electronAPI.getAccount(queryId);
-      if (accRes && accRes.success) {
-        setAccount(accRes.data);
-      } else if (accRes && accRes.error) {
-        addLog(`获取账户失败: ${accRes.error}`);
+      for (const acc of multiAccounts) {
+        const id = acc.account_id;
+
+        // Fetch Positions
+        const posRes = await window.electronAPI.getPositions(id);
+        if (posRes && posRes.success && Array.isArray(posRes.data)) {
+          allPos.push(...posRes.data);
+        }
+
+        // Fetch Trades
+        const trdRes = await window.electronAPI.getTrades(id);
+        if (trdRes && trdRes.success && Array.isArray(trdRes.data)) {
+          allTrds.push(...trdRes.data);
+        }
       }
 
-      const posRes = await window.electronAPI.getPositions(queryId);
-      if (posRes && posRes.success) {
-        setPositions(posRes.data);
-      }
+      setPositions(allPos);
+      setTrades(allTrds);
 
-      const trdRes = await window.electronAPI.getTrades(queryId);
-      if (trdRes && trdRes.success) {
-        setTrades(trdRes.data);
-      }
     } catch (e: any) {
-      addLog(`数据获取异常: ${e.message}`);
+      addLog(`同步数据异常: ${e.message}`);
     }
   };
 
@@ -239,7 +295,7 @@ export const App: React.FC = () => {
     return target.toFixed(2);
   };
 
-  const handleSymbolChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSymbolChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     let val = e.target.value.toUpperCase();
 
     const nativeEvent = e.nativeEvent as unknown as InputEvent;
@@ -254,22 +310,18 @@ export const App: React.FC = () => {
 
     const code = val.split('.')[0];
     if (code.length === 6) {
-      const name = STOCK_MAP[code] || "未知";
-      setStockName(name);
-      if (val.includes('.')) handleSubscribe(val);
+      // Fetch Real-time Stock Detail from Main Process
+      const detail = await window.electronAPI.getStockDetail(val);
+      if (detail) {
+        setStockName(detail.name);
+      } else {
+        // Fallback or still typing
+        const name = STOCK_MAP[code] || "未知";
+        setStockName(name);
+      }
+      if (val.includes('.')) window.electronAPI.setFocusSymbol(val);
     } else {
       setStockName("");
-    }
-  };
-
-  const handleSubscribe = async (sym: string) => {
-    try {
-      const res = await window.electronAPI.subscribe(sym);
-      if (res && !res.success) {
-        addLog(`订阅失败: ${res.error}`);
-      }
-    } catch (e: any) {
-      addLog(`订阅异常: ${e.message}`);
     }
   };
 
@@ -422,6 +474,48 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleToggleOrderSelection = (id: string) => {
+    setSelectedOrderIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+
+  const handleSelectAllOrders = () => {
+    if (selectedOrderIds.length === orders.length && orders.length > 0) {
+      setSelectedOrderIds([]);
+    } else {
+      setSelectedOrderIds(orders.map(o => o.orderId));
+    }
+  };
+
+  const handleInvertOrderSelection = () => {
+    const allIds = orders.map(o => o.orderId);
+    setSelectedOrderIds(prev => allIds.filter(id => !prev.includes(id)));
+  };
+
+  const handleCancelSelectedOrders = async () => {
+    if (selectedOrderIds.length === 0) {
+      addLog("未选中任何委托");
+      return;
+    }
+
+    addLog(`开始撤销选中的 ${selectedOrderIds.length} 个委托...`);
+    const promises = selectedOrderIds.map(async (id) => {
+      const order = orders.find(o => o.orderId === id);
+      if (order) {
+        // Use accountId from order if available, else fallback
+        const accId = order.accountId || (selectedAccountIds.length > 0 ? selectedAccountIds[0] : '888001');
+        const res = await window.electronAPI.cancelOrder(accId, id);
+        if (res && res.success) {
+          addLog(`> 委托 ${id} 撤单请求已发送`);
+        } else {
+          addLog(`> 委托 ${id} 撤单失败: ${res?.error || '未知错误'}`);
+        }
+      }
+    });
+
+    await Promise.all(promises);
+    setSelectedOrderIds([]); // Clear selection after action
+  };
+
   // Sorting
   const handleSort = (key: string) => {
     let direction: SortDirection = 'asc';
@@ -552,15 +646,22 @@ export const App: React.FC = () => {
       <div className="bg-gray-50 border-b border-gray-200 p-3 flex justify-between items-center">
         <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">多账户选择</span>
         <button
-          onClick={handleSelectAllAccounts}
+          onClick={() => {
+            if (selectedAccountIds.length === multiAccounts.length) setSelectedAccountIds([]);
+            else setSelectedAccountIds(multiAccounts.map(a => a.account_id));
+          }}
           className="text-xs text-blue-600 font-bold hover:text-blue-700"
         >
-          {selectedAccountIds.length === MOCK_MULTI_ACCOUNTS.length ? '全不选' : '全选'}
+          {selectedAccountIds.length === multiAccounts.length ? '全不选' : '全选'}
         </button>
       </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {MOCK_MULTI_ACCOUNTS.map(acc => {
-          const isSelected = selectedAccountIds.includes(acc.id);
+        {multiAccounts.length === 0 && (
+          <div className="py-8 px-4 text-center text-xs text-gray-400 italic">等待账户加载...</div>
+        )}
+        {multiAccounts.map(acc => {
+          const isSelected = selectedAccountIds.includes(acc.account_id);
+          const isLogin = acc.login_status === 0; // Assuming 0 is logged in/normal per snippet
 
           // Dynamic Content Logic
           let dynamicValue = '';
@@ -568,11 +669,12 @@ export const App: React.FC = () => {
           let dynamicColor = '';
 
           if (tradeSide === 'BUY') {
-            dynamicValue = `¥${acc.cash.toLocaleString()}`;
+            const accInfo = assetsMap[acc.account_id];
+            dynamicValue = accInfo ? `¥${accInfo.cash.toLocaleString()}` : '--';
             dynamicLabel = '可买';
             dynamicColor = 'text-red-600';
           } else {
-            const pos = positions.find(p => p.accountId === acc.id && p.symbol === symbol);
+            const pos = positions.find(p => p.accountId === acc.account_id && p.symbol === symbol);
             const vol = pos ? pos.canUseVolume : 0;
             dynamicValue = `${vol}股`;
             dynamicLabel = '可卖';
@@ -581,8 +683,12 @@ export const App: React.FC = () => {
 
           return (
             <div
-              key={acc.id}
-              onClick={() => handleToggleAccount(acc.id)}
+              key={acc.account_id}
+              onClick={() => {
+                setSelectedAccountIds(prev =>
+                  prev.includes(acc.account_id) ? prev.filter(id => id !== acc.account_id) : [...prev, acc.account_id]
+                );
+              }}
               className={`p-2 rounded-xl cursor-pointer border transition-all flex items-center gap-2 group ${isSelected ? 'bg-blue-50 border-blue-200' : 'bg-white border-transparent hover:bg-gray-50'}`}
             >
               <div className={`w-4 h-4 rounded border flex flex-shrink-0 items-center justify-center transition-colors ${isSelected ? 'bg-blue-600 border-blue-600' : 'border-gray-300 bg-white'}`}>
@@ -590,15 +696,15 @@ export const App: React.FC = () => {
               </div>
 
               <div className="flex-1 min-w-0 flex flex-col">
-                {/* Row 1: Name & Label */}
                 <div className="flex justify-between items-center">
-                  <span className={`text-xs font-bold truncate ${isSelected ? 'text-blue-900' : 'text-gray-900'}`}>{acc.name}</span>
-                  <span className="text-[10px] text-gray-400 scale-90 origin-right">{dynamicLabel}</span>
+                  <span className={`text-xs font-bold truncate ${isSelected ? 'text-blue-900' : 'text-gray-900'}`}>账户 {acc.account_id.slice(-4)}</span>
+                  <span className={`text-[10px] scale-90 origin-right font-bold ${isLogin ? 'text-green-500' : 'text-gray-400'}`}>
+                    {isLogin ? '在线' : '离线'}
+                  </span>
                 </div>
 
-                {/* Row 2: ID & Value */}
                 <div className="flex justify-between items-baseline mt-0.5">
-                  <span className="text-[10px] text-gray-400 font-mono">{acc.id}</span>
+                  <span className="text-[10px] text-gray-400 font-mono">{acc.account_id}</span>
                   <span className={`text-xs font-mono font-bold ${dynamicColor}`}>{dynamicValue}</span>
                 </div>
               </div>
@@ -609,66 +715,83 @@ export const App: React.FC = () => {
     </div>
   );
 
-  const renderAssetsPanel = () => (
-    <div className="p-8 h-full overflow-y-auto pt-10">
-      <h2 className="text-2xl font-bold mb-6 text-gray-800 flex items-center">
-        <span className="bg-blue-600 w-1.5 h-6 mr-3 rounded-full"></span>
-        资金账户总览
-      </h2>
+  const renderAssetsPanel = () => {
+    // Calculate Summary across all accounts
+    const totalAssets = Object.values(assetsMap).reduce((sum, acc) => sum + acc.assets, 0);
+    const totalMarketValue = Object.values(assetsMap).reduce((sum, acc) => sum + acc.marketValue, 0);
+    const totalCash = Object.values(assetsMap).reduce((sum, acc) => sum + acc.cash, 0);
 
-      {/* Top Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-        <div className={`p-6 rounded-2xl ${colors.card} bg-gradient-to-br from-white to-gray-50`}>
-          <div className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">总资产</div>
-          <div className="text-4xl font-mono font-bold text-gray-900">{account?.assets.toLocaleString() || '---'} <span className="text-sm font-normal text-gray-400">CNY</span></div>
+    return (
+      <div className="p-8 h-full overflow-y-auto pt-12">
+        <h2 className="text-2xl font-bold mb-6 text-gray-800 flex items-center">
+          <span className="bg-blue-600 w-1.5 h-6 mr-3 rounded-full"></span>
+          资金账户总览 (汇总)
+        </h2>
+
+        {/* Top Summary Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <div className={`p-6 rounded-2xl ${colors.card} bg-gradient-to-br from-white to-gray-50 border border-gray-100 shadow-sm`}>
+            <div className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">总资产</div>
+            <div className="text-4xl font-mono font-bold text-gray-900">{totalAssets > 0 ? totalAssets.toLocaleString() : '---'} <span className="text-sm font-normal text-gray-400">CNY</span></div>
+          </div>
+          <div className={`p-6 rounded-2xl ${colors.card} bg-gradient-to-br from-white to-gray-50 border border-gray-100 shadow-sm`}>
+            <div className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">持仓市值</div>
+            <div className="text-4xl font-mono font-bold text-blue-600">{totalMarketValue > 0 ? totalMarketValue.toLocaleString() : '---'}</div>
+          </div>
+          <div className={`p-6 rounded-2xl ${colors.card} bg-gradient-to-br from-white to-gray-50 border border-gray-100 shadow-sm`}>
+            <div className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">可用资金</div>
+            <div className="text-4xl font-mono font-bold text-green-600">{totalCash > 0 ? totalCash.toLocaleString() : '---'}</div>
+          </div>
         </div>
-        <div className={`p-6 rounded-2xl ${colors.card} bg-gradient-to-br from-white to-gray-50`}>
-          <div className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">持仓市值</div>
-          <div className="text-4xl font-mono font-bold text-blue-600">{account?.marketValue.toLocaleString() || '---'}</div>
-        </div>
-        <div className={`p-6 rounded-2xl ${colors.card} bg-gradient-to-br from-white to-gray-50`}>
-          <div className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-2">可用资金</div>
-          <div className="text-4xl font-mono font-bold text-green-600">{account?.cash.toLocaleString() || '---'}</div>
+
+        {/* Dynamic Account List */}
+        <div className={`rounded-xl overflow-hidden border ${colors.border} ${colors.card} shadow-sm`}>
+          <div className={`px-6 py-4 border-b ${colors.border} flex justify-between items-center bg-gray-50`}>
+            <span className="font-bold text-gray-700">账户明细</span>
+            <span className="text-xs font-mono text-gray-400">共 {multiAccounts.length} 个账户</span>
+          </div>
+          <table className="w-full text-sm text-left">
+            <thead className="bg-white text-gray-500 font-medium border-b border-gray-200">
+              <tr>
+                <th className="px-6 py-3">账号 ID</th>
+                <th className="px-6 py-3">账户类型</th>
+                <th className="px-6 py-3 text-right">总资产</th>
+                <th className="px-6 py-3 text-right">可用资金</th>
+                <th className="px-6 py-3 text-center">状态</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200">
+              {multiAccounts.length > 0 ? (
+                multiAccounts.map(acc => {
+                  const info = assetsMap[acc.account_id];
+                  const isLogin = acc.login_status === 0;
+                  return (
+                    <tr key={acc.account_id} className="hover:bg-gray-50 transition-colors">
+                      <td className="px-6 py-4 font-mono font-bold text-gray-800">{acc.account_id}</td>
+                      <td className="px-6 py-4 text-gray-500">{acc.account_type === 2 ? '股票实盘' : '普通账户'}</td>
+                      <td className="px-6 py-4 text-right font-mono">{info ? info.assets.toLocaleString() : '---'}</td>
+                      <td className="px-6 py-4 text-right font-mono text-green-600">{info ? info.cash.toLocaleString() : '---'}</td>
+                      <td className="px-6 py-4 text-center">
+                        <span className={`px-2 py-1 rounded-full text-[10px] font-bold ${isLogin ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-400'}`}>
+                          {isLogin ? '已连接' : '未登录'}
+                        </span>
+                      </td>
+                    </tr>
+                  )
+                })
+              ) : (
+                <tr>
+                  <td colSpan={5} className="px-6 py-12 text-center text-gray-400 text-sm italic">
+                    等待账户信息下发...
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
-
-      {/* Account Details / Sub-Accounts Mock */}
-      <div className={`rounded-xl overflow-hidden ${colors.card}`}>
-        <div className={`px-6 py-4 border-b ${colors.border} flex justify-between items-center bg-gray-50`}>
-          <span className="font-bold text-gray-700">账户列表</span>
-          <span className="text-xs font-mono text-gray-400">ID: {account?.accountId}</span>
-        </div>
-        <table className="w-full text-sm text-left">
-          <thead className="bg-white text-gray-500 font-medium border-b border-gray-200">
-            <tr>
-              <th className="px-6 py-2">账户名称</th>
-              <th className="px-6 py-2">账户类型</th>
-              <th className="px-6 py-2 text-right">总资产</th>
-              <th className="px-6 py-2 text-right">可用资金</th>
-              <th className="px-6 py-2 text-center">状态</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-300">
-            <tr className="hover:bg-gray-50 transition-colors">
-              <td className="px-6 py-3 font-bold text-gray-800">股票实盘账户</td>
-              <td className="px-6 py-3 text-gray-500">普通A股</td>
-              <td className="px-6 py-3 text-right font-mono">{account?.assets.toLocaleString()}</td>
-              <td className="px-6 py-3 text-right font-mono text-green-600">{account?.cash.toLocaleString()}</td>
-              <td className="px-6 py-3 text-center"><span className="px-2 py-1 bg-green-100 text-green-700 rounded-full text-xs font-bold">正常</span></td>
-            </tr>
-            {/* Mocking a second account for "Summary" feel */}
-            <tr className="hover:bg-gray-50 transition-colors">
-              <td className="px-6 py-3 font-bold text-gray-800">信用融资账户</td>
-              <td className="px-6 py-3 text-gray-500">信用两融</td>
-              <td className="px-6 py-3 text-right font-mono">0.00</td>
-              <td className="px-6 py-3 text-right font-mono text-green-600">0.00</td>
-              <td className="px-6 py-3 text-center"><span className="px-2 py-1 bg-gray-100 text-gray-400 rounded-full text-xs font-bold">未激活</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
+    );
+  };
 
   const renderPositionsTableContent = () => (
     <div className="flex-1 overflow-y-auto">
@@ -697,7 +820,7 @@ export const App: React.FC = () => {
               const profitPercent = pos.openPrice > 0 ? (profit / (pos.openPrice * pos.volume)) * 100 : 0;
 
               return (
-                <tr key={`${pos.accountId}-${pos.symbol}-${idx}`} className="hover:bg-blue-50 transition-colors cursor-pointer group" onClick={() => { setSymbol(pos.symbol); handleSubscribe(pos.symbol); }}>
+                <tr key={`${pos.accountId}-${pos.symbol}-${idx}`} className="hover:bg-blue-50 transition-colors cursor-pointer group" onClick={() => { setSymbol(pos.symbol); window.electronAPI.setFocusSymbol(pos.symbol); }}>
                   <td className="px-6 py-3">
                     <div className="text-xs font-bold text-gray-500">{pos.accountId}</div>
                   </td>
@@ -734,7 +857,7 @@ export const App: React.FC = () => {
   );
 
   const renderTableList = (columns: any[], data: any[], rowRenderer: any) => (
-    <div className={`h-full w-full flex flex-col p-8 pt-10`}>
+    <div className={`h-full w-full flex flex-col p-8 pt-12`}>
       <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card}`}>
         {/* Header */}
         <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
@@ -757,37 +880,113 @@ export const App: React.FC = () => {
     </div>
   );
 
-  const renderOrders = () => renderTableList(
-    [
-      { label: "时间", sortKey: "orderTime", className: "w-32" },
-      { label: "代码", sortKey: "symbol", className: "w-32" },
-      { label: "名称", className: "w-32" },
-      { label: "方向", sortKey: "action", className: "w-24", align: "center" },
-      { label: "价格", sortKey: "price", align: "right", className: "w-32" },
-      { label: "数量", sortKey: "volume", align: "right", className: "w-32" },
-      { label: "状态", sortKey: "status", align: "center", className: "w-32" },
-      { label: "说明", className: "flex-1" },
-    ],
-    sortData(orders),
-    (o: OrderStatus) => {
-      const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
-        <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
-          {content}
+  const renderOrders = () => (
+    <div className="h-full w-full flex flex-col p-8 pt-12">
+      {/* Action Bar */}
+      <div className="flex items-center gap-4 mb-4">
+        <div className="flex bg-white rounded-xl shadow-sm border border-gray-200 p-1">
+          <button
+            onClick={handleSelectAllOrders}
+            className="px-4 py-1.5 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            全选
+          </button>
+          <div className="w-px h-4 bg-gray-200 my-auto" />
+          <button
+            onClick={handleInvertOrderSelection}
+            className="px-4 py-1.5 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            反选
+          </button>
         </div>
-      );
-      return (
-        <React.Fragment>
-          {cell(<div className="text-xs font-mono text-gray-400">{o.orderTime?.split(' ')[0] || '--'}</div>, "w-32")}
-          {cell(<div className="font-mono font-bold text-gray-800">{o.symbol}</div>, "w-32")}
-          {cell(<div className="font-medium text-gray-700">{o.stockName}</div>, "w-32")}
-          {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${o.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{o.action === 'BUY' ? '买入' : '卖出'}</div>, "w-24", "center")}
-          {cell(<div className="font-mono text-gray-600">{o.price.toFixed(2)}</div>, "w-32", "right")}
-          {cell(<div className="font-mono text-gray-600">{o.filledVolume}/{o.volume}</div>, "w-32", "right")}
-          {cell(<span className={`px-2 py-1 rounded text-[10px] font-bold ${o.status === 'FILLED' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{o.status}</span>, "w-32", "center")}
-          {cell(<div className="text-xs text-gray-400 truncate">{o.msg}</div>, "flex-1")}
-        </React.Fragment>
-      )
-    }
+
+        <button
+          onClick={handleCancelSelectedOrders}
+          disabled={selectedOrderIds.length === 0}
+          className={`flex items-center gap-2 px-6 py-1.5 rounded-xl text-xs font-bold shadow-sm transition-all ${selectedOrderIds.length > 0
+            ? 'bg-red-600 text-white hover:bg-red-700 shadow-red-200 active:scale-95'
+            : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+            }`}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+          选中撤单 ({selectedOrderIds.length})
+        </button>
+
+        <div className="flex-1" />
+        <span className="text-xs text-gray-400 font-medium">共 {orders.length} 笔委托</span>
+      </div>
+
+      <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card}`}>
+        <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
+          <div className="w-12 px-6 py-2 flex items-center justify-center">
+            <input
+              type="checkbox"
+              className="rounded border-gray-300 text-blue-600 focus:ring-blue-600"
+              checked={orders.length > 0 && selectedOrderIds.length === orders.length}
+              onChange={handleSelectAllOrders}
+            />
+          </div>
+          {[
+            { label: "时间", sortKey: "orderTime", className: "w-32" },
+            { label: "代码", sortKey: "symbol", className: "w-32" },
+            { label: "名称", className: "w-32" },
+            { label: "方向", sortKey: "action", className: "w-24", align: "center" },
+            { label: "价格", sortKey: "price", align: "right", className: "w-24" },
+            { label: "数量", sortKey: "volume", align: "right", className: "w-32" },
+            { label: "状态", sortKey: "status", align: "center", className: "w-32" },
+            { label: "说明", className: "flex-1" },
+          ].map((col: any, i: number) => (
+            <div key={i} className={`${col.className} px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider`}>
+              {col.sortKey ? renderSortHeader(col.label, col.sortKey, col.align, '') : <div className={`flex w-full ${col.align === 'right' ? 'justify-end' : col.align === 'center' ? 'justify-center' : ''}`}>{col.label}</div>}
+            </div>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-y-auto bg-white">
+          {sortData(orders).length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-4 opacity-50">
+              <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <span className="text-sm font-medium">暂无委托数据</span>
+            </div>
+          ) : sortData(orders).map((o: OrderStatus, i: number) => {
+            const isSelected = selectedOrderIds.includes(o.orderId);
+            const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
+              <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+                {content}
+              </div>
+            );
+            return (
+              <div
+                key={o.orderId}
+                className={`flex border-b last:border-b-0 border-gray-100 hover:bg-blue-50/50 transition-colors group ${isSelected ? 'bg-blue-50/80' : ''}`}
+                onClick={() => handleToggleOrderSelection(o.orderId)}
+              >
+                <div className="w-12 px-6 py-2 flex items-center justify-center">
+                  <input
+                    type="checkbox"
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-600"
+                    checked={isSelected}
+                    onChange={() => { }} // Handled by row onClick
+                  />
+                </div>
+                {cell(<div className="text-xs font-mono text-gray-400">{o.orderTime?.split(' ')[1] || o.orderTime || '--'}</div>, "w-32")}
+                {cell(<div className="font-mono font-bold text-gray-800">{o.symbol}</div>, "w-32")}
+                {cell(<div className="font-medium text-gray-700">{o.stockName}</div>, "w-32")}
+                {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${o.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{o.action === 'BUY' ? '买入' : '卖出'}</div>, "w-24", "center")}
+                {cell(<div className="font-mono text-gray-600">{o.price.toFixed(2)}</div>, "w-24", "right")}
+                {cell(<div className="font-mono text-gray-600">{o.filledVolume}/{o.volume}</div>, "w-32", "right")}
+                {cell(<span className={`px-2 py-1 rounded text-[10px] font-bold ${o.status === 'FILLED' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{o.status}</span>, "w-32", "center")}
+                {cell(<div className="text-xs text-gray-400 truncate">{o.msg}</div>, "flex-1")}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
   );
 
   const renderTrades = () => renderTableList(
@@ -822,8 +1021,8 @@ export const App: React.FC = () => {
   );
 
   const renderLogs = () => (
-    <div className={`h-full w-full flex flex-col ${colors.contentBg} pt-10`}>
-      <div className="h-full flex flex-col p-6 pt-8">
+    <div className={`h-full w-full flex flex-col ${colors.contentBg} pt-12`}>
+      <div className="h-full flex flex-col p-6">
         <div className={`flex-1 rounded-3xl p-6 overflow-hidden shadow-sm ${colors.card} flex flex-col`}>
           <div className="flex justify-between items-center mb-4">
             <h3 className="font-bold text-gray-700">系统日志</h3>
@@ -843,7 +1042,7 @@ export const App: React.FC = () => {
   );
 
   const renderTradePanel = () => (
-    <div className="flex flex-col h-full w-full p-6 gap-6 pt-8"> {/* Added top padding for window controls */}
+    <div className="flex flex-col h-full w-full p-6 gap-6 pt-12"> {/* Increased top padding for window controls */}
 
       {/* TOP ROW: Accounts | Trade Form | Order Book | Chart */}
       {/* Increased height to 420px to provide more vertical room */}
@@ -880,6 +1079,8 @@ export const App: React.FC = () => {
                 type="text"
                 value={symbol}
                 onChange={handleSymbolChange}
+                spellCheck="false"
+                autoComplete="off"
                 className={`w-full py-1.5 px-4 rounded-xl border-2 outline-none font-mono text-lg font-bold uppercase tracking-wide transition-all ${colors.input}`}
                 placeholder="股票代码"
               />
@@ -918,6 +1119,8 @@ export const App: React.FC = () => {
                   value={price}
                   onChange={e => { setPrice(e.target.value); setPriceType('LIMIT'); }} // Auto switch to manual
                   placeholder={currentPrice.toFixed(2)}
+                  spellCheck="false"
+                  autoComplete="off"
                   className={`w-full py-1.5 pl-8 pr-8 rounded-xl border-2 outline-none font-mono text-lg font-bold text-center transition-all ${priceType !== 'LIMIT' ? 'border-blue-400 bg-blue-50 text-blue-700' : colors.input} [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
                 />
                 <button
@@ -960,6 +1163,8 @@ export const App: React.FC = () => {
                   type="text"
                   value={volStrategy.type === 'RATIO' ? volStrategy.label : volStrategy.value}
                   onChange={handleVolumeInputChange}
+                  spellCheck="false"
+                  autoComplete="off"
                   onClick={() => {
                     if (volStrategy.type === 'RATIO') {
                       setVolStrategy({ type: 'MANUAL', value: '' });
@@ -1178,8 +1383,8 @@ export const App: React.FC = () => {
       <div className={`flex-1 flex flex-col relative overflow-hidden ${colors.contentBg}`}>
 
         {/* Window Controls Header Overlay */}
-        <div className="absolute top-0 right-0 left-0 h-10 flex justify-end items-center px-4 space-x-2 z-50 app-drag-region pointer-events-none">
-          <div className="flex space-x-1 pointer-events-auto no-drag bg-gray-200/50 backdrop-blur-sm p-1 rounded-lg border border-gray-300/50">
+        <div className="absolute top-0 right-0 left-0 h-12 flex justify-end items-center px-4 space-x-2 z-50 app-drag-region pointer-events-none">
+          <div className="flex space-x-1 pointer-events-auto no-drag p-1">
             <button
               onClick={handleMinimize}
               className="w-8 h-6 flex items-center justify-center rounded hover:bg-gray-300 text-gray-500 hover:text-gray-800 transition-colors"
