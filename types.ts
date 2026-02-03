@@ -90,12 +90,13 @@ export interface OrderRequest {
 
 export interface OrderStatus {
   orderId: string;
+  orderSysId: string; // order_sysid from backend
   accountId: string;
   orderTime: string;
   symbol: string;
   stockName: string;
   action: 'BUY' | 'SELL';
-  status: 'SUBMITTED' | 'FILLED' | 'CANCELED' | 'REJECTED';
+  status: 'SUBMITTED' | 'FILLED' | 'CANCELED' | 'REJECTED' | 'UNREPORTED' | 'WAIT_REPORTING' | 'REPORTED' | 'REPORTED_CANCEL' | 'PARTSUCC_CANCEL' | 'PART_CANCEL' | 'PART_SUCC' | 'JUNK' | 'UNKNOWN';
   price: number;
   volume: number;
   filledVolume: number;
@@ -125,7 +126,11 @@ export interface IElectronAPI {
   onSystemLog: (callback: (msg: string) => void) => () => void;
   onAccounts: (callback: (accounts: MultiAccountInfo[]) => void) => () => void;
   onAssetsSnapshot: (callback: (assets: any[]) => void) => () => void;
+  onPositionsSnapshot: (callback: (positions: Position[]) => void) => () => void;
+  onOrdersSnapshot: (callback: (orders: OrderStatus[]) => void) => () => void;
   getStockDetail: (symbol: string) => Promise<StockDetail | null>;
+  queryPositionsSnapshot: (accountIds?: string[]) => Promise<void>;
+  queryOrdersSnapshot: (accountIds?: string[]) => Promise<void>;
 
   // Window Controls
   minimizeWindow: () => Promise<void>;

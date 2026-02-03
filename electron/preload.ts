@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setFocusSymbol: (symbol: string) => ipcRenderer.send('trade:set-focus', symbol),
   getTickSnapshot: (symbol: string) => ipcRenderer.invoke('trade:get-tick', symbol),
   getStockDetail: (symbol: string) => ipcRenderer.invoke('trade:get-stock-detail', symbol),
+  queryPositionsSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-positions-snapshot', accountIds),
+  queryOrdersSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-orders-snapshot', accountIds),
 
   // Listeners (Return cleanup functions)
   onTick: (callback: any) => {
@@ -36,6 +38,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const subscription = (_: any, data: any) => callback(data);
     ipcRenderer.on('push:assets-snapshot', subscription);
     return () => ipcRenderer.removeListener('push:assets-snapshot', subscription);
+  },
+  onPositionsSnapshot: (callback: (data: any[]) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:positions-snapshot', subscription);
+    return () => ipcRenderer.removeListener('push:positions-snapshot', subscription);
+  },
+  onOrdersSnapshot: (callback: (data: any[]) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:orders-snapshot', subscription);
+    return () => ipcRenderer.removeListener('push:orders-snapshot', subscription);
   },
 
   // Window Controls

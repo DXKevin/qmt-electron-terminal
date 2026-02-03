@@ -103,6 +103,54 @@ function createWindow() {
   });
 
   bridge.on('order_update', (data) => safeSend('push:order', data));
+  bridge.on('orders_snapshot', (data: any) => {
+    console.log("[Main] Received orders_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
+
+    const rawList = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
+
+    const cleanList = rawList.map((item: any) => {
+      const detail = stockDetailMap.get(item.symbol);
+
+      // Status Mapping based on QMT codes
+      let statusString = 'UNKNOWN';
+      switch (item.order_status) {
+        case 48: statusString = 'UNREPORTED'; break;       // 未报
+        case 49: statusString = 'WAIT_REPORTING'; break;   // 待报
+        case 50: statusString = 'REPORTED'; break;         // 已报
+        case 51: statusString = 'REPORTED_CANCEL'; break;  // 已报待撤
+        case 52: statusString = 'PARTSUCC_CANCEL'; break;  // 部成待撤
+        case 53: statusString = 'PART_CANCEL'; break;      // 部撤
+        case 54: statusString = 'CANCELED'; break;         // 已撤
+        case 55: statusString = 'PART_SUCC'; break;        // 部成 (Partially Filled)
+        case 56: statusString = 'FILLED'; break;           // 已成
+        case 57: statusString = 'JUNK'; break;             // 废单
+        default: statusString = 'UNKNOWN'; break;
+      }
+
+      // Determine Action
+      const action = (item.order_type === 23) ? 'BUY' : 'SELL';
+
+      // Time formatting (unix timestamp to HH:mm:ss)
+      let timeStr = item.order_time ? new Date(item.order_time * 1000).toLocaleTimeString() : '';
+
+      return {
+        orderId: item.order_sysid || String(item.order_id), // Use sysid if available
+        orderSysId: item.order_sysid || String(item.order_id), // Explicit orderSysId for deduplication
+        accountId: item.account_id,
+        orderTime: timeStr,
+        symbol: item.symbol,
+        stockName: detail ? detail.name : item.symbol,
+        action: action,
+        status: statusString,
+        price: item.price,
+        volume: item.order_volume,
+        filledVolume: item.traded_volume,
+        msg: item.status_msg || ''
+      };
+    });
+
+    safeSend('push:orders-snapshot', cleanList);
+  });
   bridge.on('account_infos', (data: any[]) => {
     console.log(`[Main] account_infos event received. Count: ${data?.length}`);
     // 1. Forward to frontend
@@ -177,7 +225,33 @@ function createWindow() {
       });
     }
     console.log(`[Main] Stock details updated: ${stockDetailMap.size} stocks.`);
+    console.log(`[Main] Stock details updated: ${stockDetailMap.size} stocks.`);
   });
+
+  bridge.on('positions_snapshot', (data: any) => {
+    // bridge.ts emits `msg.data` directly, so `data` is the array of positions
+    console.log("[Main] Received positions_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
+
+    // Fallback: if for some reason it's the full object (future proofing), check data property
+    const rawList = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
+
+    const cleanList = rawList.map((item: any) => {
+      // Map fields to frontend Position interface
+      const detail = stockDetailMap.get(item.symbol);
+      return {
+        accountId: item.account_id,
+        symbol: item.symbol,
+        stockName: detail ? detail.name : item.symbol, // Enrich name if possible
+        volume: item.volume,
+        canUseVolume: item.can_use_volume,
+        openPrice: item.avg_price, // Use avg_price for cost basis calculation
+        marketValue: item.market_value
+      };
+    });
+
+    safeSend('push:positions-snapshot', cleanList);
+  });
+
   bridge.on('log', (msg) => safeSend('push:log', msg));
   bridge.on('error', (msg) => safeSend('push:log', `[连接错误] ${msg}`));
 
@@ -201,7 +275,49 @@ app.whenReady().then(() => {
     return bridge.sendRequest(ActionType.QUERY_POSITIONS, { account_id: accountId });
   });
 
-  // 3. Trades
+  ipcMain.handle('trade:query-positions-snapshot', async (_, accountIds?: string[]) => {
+    if (!bridge) return;
+
+    // Use provided IDs or fallback to known managed IDs
+    const targets = (accountIds && accountIds.length > 0) ? accountIds : managedAccountIds;
+
+    console.log(`[Main] Requesting positions snapshot for ${targets.length} accounts...`);
+
+    if (targets.length === 0) {
+      console.warn("[Main] No accounts to query positions for.");
+      return;
+    }
+
+    // Iterate accounts and request positions for each (as "Fire and forget")
+    targets.forEach((id, idx) => {
+      setTimeout(() => {
+        // Use QUERY_POSITIONS as requested by user
+        (bridge as any).sendNotify(ActionType.QUERY_POSITIONS, { account_id: id });
+      }, idx * 50); // Small stagger to avoid pipe congestion
+    });
+  });
+
+  ipcMain.handle('trade:query-orders-snapshot', async (_, accountIds?: string[]) => {
+    if (!bridge) return;
+
+    // Use provided IDs or fallback to known managed IDs
+    const targets = (accountIds && accountIds.length > 0) ? accountIds : managedAccountIds;
+
+    console.log(`[Main] Requesting orders snapshot for ${targets.length} accounts...`);
+
+    if (targets.length === 0) {
+      console.warn("[Main] No accounts to query orders for.");
+      return;
+    }
+
+    targets.forEach((id, idx) => {
+      setTimeout(() => {
+        (bridge as any).sendNotify(ActionType.QUERY_ORDERS, { account_id: id });
+      }, idx * 50);
+    });
+  });
+
+  // 3. Trades (Keep legacy)
   ipcMain.handle('trade:trades', async (_, accountId: string) => {
     if (!bridge) return { success: false, error: "主进程未就绪" };
     return bridge.sendRequest(ActionType.QUERY_TRADES, { account_id: accountId });

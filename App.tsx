@@ -10,15 +10,7 @@ type SortDirection = 'asc' | 'desc';
 // Removed LIMIT_UP and LIMIT_DOWN from PriceMode as they are now static fills
 type PriceMode = 'LIMIT' | 'BEST_5' | 'OPPOSITE' | 'CAGE';
 
-const STOCK_MAP: Record<string, string> = {
-  '600000': '浦发银行',
-  '600519': '贵州茅台',
-  '000001': '平安银行',
-  '000725': '京东方A',
-  '300750': '宁德时代',
-  '601127': '赛力斯',
-  '601888': '中国中免'
-};
+const STOCK_MAP: Record<string, string> = {};
 
 // Mock Accounts - To be connected to backend data
 const MOCK_MULTI_ACCOUNTS: any[] = [];
@@ -86,6 +78,7 @@ export const App: React.FC = () => {
   const [multiAccounts, setMultiAccounts] = useState<MultiAccountInfo[]>([]);
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [selectedOrderIds, setSelectedOrderIds] = useState<string[]>([]);
+  const [showCancellableOnly, setShowCancellableOnly] = useState(false); // Filter state
   const [assetsMap, setAssetsMap] = useState<Record<string, AccountInfo>>({});
 
   // Trade Form State
@@ -95,7 +88,10 @@ export const App: React.FC = () => {
 
   // --- VOLUME STRATEGY STATE ---
   // Replaces simple string volume to handle "Percentage Strategy"
-  const [volStrategy, setVolStrategy] = useState<VolumeStrategy>({ type: 'MANUAL', value: '100' });
+  const [volStrategy, setVolStrategy] = useState<any>({
+    mode: 'fixed', // 'fixed' | 'percent'
+    value: 100 // volume or percentage
+  });
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [priceType, setPriceType] = useState<PriceMode>('LIMIT'); // Track price mode
@@ -109,7 +105,39 @@ export const App: React.FC = () => {
     setLogs(prev => [...prev.slice(-199), `[${new Date().toLocaleTimeString()}] ${msg}`]);
   }, []);
 
+  // Helper function to generate unique order key
+  const getOrderUniqueKey = useCallback((order: OrderStatus) => `${order.accountId}_${order.orderSysId}`, []);
+
   const isFirstMount = useRef(true);
+
+  const onOrdersSnapshot = useCallback((newOrders: OrderStatus[]) => {
+    setOrders(prev => {
+      if (!newOrders || newOrders.length === 0) return prev;
+
+      // Use accountId + orderSysId as unique key to prevent duplicates
+      const getUniqueKey = (order: OrderStatus) => `${order.accountId}_${order.orderSysId}`;
+
+      // Create a map of existing orders by unique key
+      const existingMap = new Map(prev.map(o => [getUniqueKey(o), o]));
+
+      // Update or add new orders (incremental update to reduce flickering)
+      newOrders.forEach(newOrder => {
+        const key = getUniqueKey(newOrder);
+        const existing = existingMap.get(key);
+
+        // Only update if the order has actually changed (deep comparison of key fields)
+        if (!existing ||
+          existing.status !== newOrder.status ||
+          existing.filledVolume !== newOrder.filledVolume ||
+          existing.price !== newOrder.price) {
+          existingMap.set(key, newOrder);
+        }
+      });
+
+      return Array.from(existingMap.values());
+    });
+    addLog(`收到委托更新: ${newOrders.length} 条记录`);
+  }, [addLog]);
 
   // Initialize listeners
   useEffect(() => {
@@ -150,6 +178,8 @@ export const App: React.FC = () => {
 
     const unsubAssetsSnapshot = window.electronAPI.onAssetsSnapshot((dataArray) => {
       const updates: Record<string, AccountInfo> = {};
+      const newAccountIds: string[] = [];
+
       dataArray.forEach((raw: any) => {
         const info: AccountInfo = {
           accountId: raw.account_id,
@@ -158,19 +188,65 @@ export const App: React.FC = () => {
           cash: raw.cash || 0
         };
         updates[info.accountId] = info;
+        newAccountIds.push(info.accountId);
       });
 
       setAssetsMap(prev => ({ ...prev, ...updates }));
 
+      // Fallback: Ensure multiAccounts is populated if we receive assets but missed initial account push
+      setMultiAccounts(prev => {
+        const existingIds = new Set(prev.map(a => a.account_id));
+        const missingAccounts: any[] = [];
+
+        newAccountIds.forEach(id => {
+          if (!existingIds.has(id)) {
+            // Create a placeholder account entry
+            missingAccounts.push({
+              account_id: id,
+              account_type: 2, // Default to Stock
+              broker_type: 0,
+              platform_id: 0,
+              account_classification: 0,
+              login_status: 0
+            });
+          }
+        });
+
+        if (missingAccounts.length > 0) {
+          return [...prev, ...missingAccounts];
+        }
+        return prev;
+      });
+
       // If the currently "active" account (first selected) is in this snapshot, update the main header
       setSelectedAccountIds(currentSelected => {
         const activeId = currentSelected[0];
+        // Auto-select first found account if nothing selected
+        if (currentSelected.length === 0 && newAccountIds.length > 0) {
+          return [newAccountIds[0]];
+        }
         if (activeId && updates[activeId]) {
           setAccount(updates[activeId]);
         }
         return currentSelected;
       });
     });
+
+    const unsubPositionsSnapshot = window.electronAPI.onPositionsSnapshot((newPositions) => {
+      // Merge logic: Update positions for the specific account received
+      setPositions(prev => {
+        if (!newPositions || newPositions.length === 0) return prev; // Cannot update if we don't know the account ID from empty list
+
+        const accountId = newPositions[0].accountId;
+        // Remove old positions for this account
+        const others = prev.filter(p => p.accountId !== accountId);
+        // Add new positions
+        return [...others, ...newPositions];
+      });
+      addLog(`收到持仓更新: ${newPositions.length} 条记录`);
+    });
+
+    const unsubOrdersSnapshot = window.electronAPI.onOrdersSnapshot(onOrdersSnapshot);
 
     if (isFirstMount.current) {
       // fetchData(); // Removed initial call to prevent "Not Connected" errors
@@ -184,6 +260,8 @@ export const App: React.FC = () => {
       unsubOrder();
       unsubAccounts();
       unsubAssetsSnapshot();
+      unsubPositionsSnapshot();
+      unsubOrdersSnapshot();
     };
   }, [addLog]);
 
@@ -209,37 +287,51 @@ export const App: React.FC = () => {
   }, [ticks, priceType, tradeSide, symbol]);
 
 
-  const fetchData = async () => {
+  // Polling positions & orders every 5 seconds
+  useEffect(() => {
     if (multiAccounts.length === 0) return;
 
-    addLog(`正在同步 ${multiAccounts.length} 个账户的行情快照与持仓...`);
+    const timer = setInterval(() => {
+      const ids = multiAccounts.map(a => a.account_id);
+      window.electronAPI.queryPositionsSnapshot(ids);
+      window.electronAPI.queryOrdersSnapshot(ids); // Also poll orders
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [multiAccounts]);
+
+  const fetchData = async () => {
+    // Actively request a snapshot from Python if we have accounts
+    if (multiAccounts.length > 0) {
+      const ids = multiAccounts.map(a => a.account_id);
+      addLog(`正在请求持仓与委托快照...`);
+      window.electronAPI.queryPositionsSnapshot(ids);
+      window.electronAPI.queryOrdersSnapshot(ids);
+    } else {
+      addLog(`暂无账户信息，跳过请求`);
+    }
+
+    // We can also fetch trades in parallel or sequence if needed, keeping legacy for trades for now
+    // Or if trades are also snapshotted, we would update that too. 
+    // Assuming trades are still pulled per account or need a similar update. 
+    // For now, preserving trade fetch but removing position fetch loop.
+
+    if (multiAccounts.length === 0) return;
 
     try {
-      // 1. Batch Positions & Trades
-      const allPos: Position[] = [];
       const allTrds: Trade[] = [];
-
       for (const acc of multiAccounts) {
         const id = acc.account_id;
-
-        // Fetch Positions
-        const posRes = await window.electronAPI.getPositions(id);
-        if (posRes && posRes.success && Array.isArray(posRes.data)) {
-          allPos.push(...posRes.data);
-        }
-
         // Fetch Trades
+        // Note: If you want to snapshot trades too, you should add a similar snapshot for trades.
         const trdRes = await window.electronAPI.getTrades(id);
         if (trdRes && trdRes.success && Array.isArray(trdRes.data)) {
           allTrds.push(...trdRes.data);
         }
       }
-
-      setPositions(allPos);
       setTrades(allTrds);
-
     } catch (e: any) {
-      addLog(`同步数据异常: ${e.message}`);
+      addLog(`同步成交数据异常: ${e.message}`);
     }
   };
 
@@ -900,6 +992,17 @@ export const App: React.FC = () => {
           </button>
         </div>
 
+        {/* Cancellable Filter */}
+        <label className="flex items-center space-x-2 text-xs font-bold text-gray-600 bg-white px-3 py-1.5 rounded-xl border border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors select-none">
+          <input
+            type="checkbox"
+            className="rounded border-gray-300 text-blue-600 focus:ring-blue-600"
+            checked={showCancellableOnly}
+            onChange={(e) => setShowCancellableOnly(e.target.checked)}
+          />
+          <span>仅显示可撤</span>
+        </label>
+
         <button
           onClick={handleCancelSelectedOrders}
           disabled={selectedOrderIds.length === 0}
@@ -919,6 +1022,7 @@ export const App: React.FC = () => {
       </div>
 
       <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card}`}>
+        {/* Header */}
         <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
           <div className="w-12 px-6 py-2 flex items-center justify-center">
             <input
@@ -930,11 +1034,13 @@ export const App: React.FC = () => {
           </div>
           {[
             { label: "时间", sortKey: "orderTime", className: "w-32" },
+            { label: "账户", sortKey: "accountId", className: "w-32" },
+            { label: "合同号", sortKey: "orderSysId", className: "w-36" },
             { label: "代码", sortKey: "symbol", className: "w-32" },
             { label: "名称", className: "w-32" },
             { label: "方向", sortKey: "action", className: "w-24", align: "center" },
-            { label: "价格", sortKey: "price", align: "right", className: "w-24" },
-            { label: "数量", sortKey: "volume", align: "right", className: "w-32" },
+            { label: "价格", sortKey: "price", align: "right", className: "w-28" },
+            { label: "数量", sortKey: "volume", align: "right", className: "w-36" },
             { label: "状态", sortKey: "status", align: "center", className: "w-32" },
             { label: "说明", className: "flex-1" },
           ].map((col: any, i: number) => (
@@ -944,46 +1050,70 @@ export const App: React.FC = () => {
           ))}
         </div>
 
+        {/* List */}
         <div className="flex-1 overflow-y-auto bg-white">
-          {sortData(orders).length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-4 opacity-50">
-              <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              <span className="text-sm font-medium">暂无委托数据</span>
-            </div>
-          ) : sortData(orders).map((o: OrderStatus, i: number) => {
-            const isSelected = selectedOrderIds.includes(o.orderId);
-            const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
-              <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
-                {content}
-              </div>
-            );
-            return (
-              <div
-                key={o.orderId}
-                className={`flex border-b last:border-b-0 border-gray-100 hover:bg-blue-50/50 transition-colors group ${isSelected ? 'bg-blue-50/80' : ''}`}
-                onClick={() => handleToggleOrderSelection(o.orderId)}
-              >
-                <div className="w-12 px-6 py-2 flex items-center justify-center">
-                  <input
-                    type="checkbox"
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-600"
-                    checked={isSelected}
-                    onChange={() => { }} // Handled by row onClick
-                  />
+          {(() => {
+            const displayed = showCancellableOnly
+              ? orders.filter(o => ['UNREPORTED', 'WAIT_REPORTING', 'REPORTED', 'SUBMITTED', 'PART_SUCC', 'UNKNOWN'].includes(o.status))
+              : orders;
+            const sorted = sortData(displayed);
+
+            if (sorted.length === 0) {
+              return (
+                <div className="h-full flex flex-col items-center justify-center text-gray-400 gap-4 opacity-50">
+                  <svg className="w-12 h-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  <span className="text-sm font-medium">暂无委托数据</span>
                 </div>
-                {cell(<div className="text-xs font-mono text-gray-400">{o.orderTime?.split(' ')[1] || o.orderTime || '--'}</div>, "w-32")}
-                {cell(<div className="font-mono font-bold text-gray-800">{o.symbol}</div>, "w-32")}
-                {cell(<div className="font-medium text-gray-700">{o.stockName}</div>, "w-32")}
-                {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${o.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{o.action === 'BUY' ? '买入' : '卖出'}</div>, "w-24", "center")}
-                {cell(<div className="font-mono text-gray-600">{o.price.toFixed(2)}</div>, "w-24", "right")}
-                {cell(<div className="font-mono text-gray-600">{o.filledVolume}/{o.volume}</div>, "w-32", "right")}
-                {cell(<span className={`px-2 py-1 rounded text-[10px] font-bold ${o.status === 'FILLED' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>{o.status}</span>, "w-32", "center")}
-                {cell(<div className="text-xs text-gray-400 truncate">{o.msg}</div>, "flex-1")}
-              </div>
-            );
-          })}
+              );
+            }
+
+            return sorted.map((o: OrderStatus) => {
+              const uniqueKey = getOrderUniqueKey(o);
+              const isSelected = selectedOrderIds.includes(uniqueKey);
+              const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
+                <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+                  {content}
+                </div>
+              );
+              return (
+                <div
+                  key={uniqueKey}
+                  className={`flex border-b last:border-b-0 border-gray-100 hover:bg-blue-50/50 transition-colors group ${isSelected ? 'bg-blue-50/80' : ''}`}
+                  onClick={() => {
+                    setSelectedOrderIds(prev =>
+                      prev.includes(uniqueKey) ? prev.filter(id => id !== uniqueKey) : [...prev, uniqueKey]
+                    );
+                  }}
+                >
+                  <div className="w-12 px-6 py-2 flex items-center justify-center">
+                    <input
+                      type="checkbox"
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-600"
+                      checked={isSelected}
+                      onChange={() => { }}
+                    />
+                  </div>
+                  {cell(<div className="text-xs font-mono text-gray-400">{o.orderTime?.split(' ')[1] || o.orderTime || '--'}</div>, "w-28")}
+                  {cell(<div className="font-bold text-gray-400 text-xs">{o.accountId}</div>, "w-24")}
+                  {cell(<div className="font-mono text-gray-600 text-xs">{o.orderSysId}</div>, "w-28")}
+                  {cell(<div className="font-mono font-bold text-gray-800">{o.symbol}</div>, "w-28")}
+                  {cell(<div className="font-medium text-gray-700">{o.stockName}</div>, "w-24")}
+                  {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${o.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{o.action === 'BUY' ? '买入' : '卖出'}</div>, "w-20", "center")}
+                  {cell(<div className="font-mono text-gray-600">{o.price.toFixed(2)}</div>, "w-24", "right")}
+                  {cell(<div className="font-mono text-gray-600">{o.filledVolume}/{o.volume}</div>, "w-28", "right")}
+                  {cell(<span className={`px-2 py-1 rounded text-[10px] font-bold 
+                    ${(o.status === 'FILLED' || o.status === 'PART_SUCC') ? 'bg-green-100 text-green-700' :
+                      (o.status === 'CANCELED' || o.status === 'PART_CANCEL' || o.status === 'PARTSUCC_CANCEL' || o.status === 'REPORTED_CANCEL') ? 'bg-yellow-100 text-yellow-700' :
+                        (o.status === 'JUNK' || o.status === 'REJECTED') ? 'bg-red-100 text-red-700' :
+                          'bg-blue-50 text-blue-600'
+                    }`}>{o.status}</span>, "w-28", "center")}
+                  {cell(<div className="text-xs text-gray-400 truncate">{o.msg}</div>, "flex-1")}
+                </div>
+              );
+            });
+          })()}
         </div>
       </div>
     </div>

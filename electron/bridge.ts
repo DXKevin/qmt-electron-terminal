@@ -3,13 +3,6 @@ import net from 'net';
 import { EventEmitter } from 'events';
 import { Protocol } from './protocol';
 
-/**
- * 这是一个“大一统”的桥接类
- * 它把之前的 RequestClient(发送), ResponseServer(接收), TransactionManager(事务), 
- * InstructionSender, ResponseReceiver 全部合并在了一起。
- * 
- * 目的：让代码更简单，文件更少，逻辑更直观。
- */
 export class PythonBridge extends EventEmitter {
   // --- 管道配置 ---
   private readonly PIPE_REQ = '\\\\.\\pipe\\request_pipe'; // 发送给Python
