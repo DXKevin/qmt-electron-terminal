@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { TickData, AccountInfo, OrderRequest, OrderStatus, Position, Trade, MultiAccountInfo } from './types';
 
 // ----------------------------------------------------------------------
@@ -98,6 +98,7 @@ export const App: React.FC = () => {
 
   // Window Controls State
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -136,8 +137,42 @@ export const App: React.FC = () => {
 
       return Array.from(existingMap.values());
     });
-    addLog(`收到委托更新: ${newOrders.length} 条记录`);
   }, [addLog]);
+
+  const fetchData = async () => {
+    // Actively request a snapshot from Python if we have accounts
+    if (multiAccounts.length > 0) {
+      const ids = multiAccounts.map(a => a.account_id);
+      addLog(`正在请求持仓与委托快照...`);
+      window.electronAPI.queryPositionsSnapshot(ids);
+      window.electronAPI.queryOrdersSnapshot(ids);
+    } else {
+      addLog(`暂无账户信息，跳过请求`);
+    }
+
+    // We can also fetch trades in parallel or sequence if needed, keeping legacy for trades for now
+    // Or if trades are also snapshotted, we would update that too. 
+    // Assuming trades are still pulled per account or need a similar update. 
+    // For now, preserving trade fetch but removing position fetch loop.
+
+    if (multiAccounts.length === 0) return;
+
+    try {
+      const allTrds: Trade[] = [];
+      for (const acc of multiAccounts) {
+        const id = acc.account_id;
+        // Fetch Trades
+        // Note: If you want to snapshot trades too, you should add a similar snapshot for trades.
+        const trdRes = await window.electronAPI.getTrades(id);
+        if (trdRes && trdRes.success && Array.isArray(trdRes.data)) {
+          allTrds.push(...trdRes.data);
+        }
+      }
+      setTrades(allTrds);
+    } catch (e: any) {
+      addLog(`同步成交数据异常: ${e.message}`);
+    }
+  };
 
   // Initialize listeners
   useEffect(() => {
@@ -174,6 +209,12 @@ export const App: React.FC = () => {
       // Auto-select first account if none selected
       setSelectedAccountIds(prev => prev.length === 0 && accounts.length > 0 ? [accounts[0].account_id] : prev);
       addLog(`系统已加载 ${accounts.length} 个资金账户`);
+      // 收到账户信息后立即查询持仓和委托
+      if (accounts.length > 0) {
+        const ids = accounts.map(a => a.account_id);
+        window.electronAPI.queryPositionsSnapshot(ids);
+        window.electronAPI.queryOrdersSnapshot(ids);
+      }
     });
 
     const unsubAssetsSnapshot = window.electronAPI.onAssetsSnapshot((dataArray) => {
@@ -230,20 +271,59 @@ export const App: React.FC = () => {
         }
         return currentSelected;
       });
+
+      // 收到资产快照后也立即查询持仓和委托（以防 onAccounts 还没触发）
+      if (newAccountIds.length > 0) {
+        window.electronAPI.queryPositionsSnapshot(newAccountIds);
+        window.electronAPI.queryOrdersSnapshot(newAccountIds);
+      }
     });
 
     const unsubPositionsSnapshot = window.electronAPI.onPositionsSnapshot((newPositions) => {
-      // Merge logic: Update positions for the specific account received
+      // 只有数据真正变化时才更新
       setPositions(prev => {
-        if (!newPositions || newPositions.length === 0) return prev; // Cannot update if we don't know the account ID from empty list
+        if (!newPositions || newPositions.length === 0) return prev;
 
         const accountId = newPositions[0].accountId;
-        // Remove old positions for this account
+        const existingIndex = prev.findIndex(p => p.accountId === accountId);
+
+        // 如果已有相同数据且没有变化，跳过更新
+        if (existingIndex >= 0) {
+          const existingPos = prev[existingIndex];
+          const newPos = newPositions[0];
+          const isSameData =
+            existingPos.accountId === newPos.accountId &&
+            existingPos.symbol === newPos.symbol &&
+            existingPos.volume === newPos.volume &&
+            existingPos.marketValue === newPos.marketValue &&
+            existingPos.canUseVolume === newPos.canUseVolume &&
+            existingPos.openPrice === newPos.openPrice &&
+            existingPos.stockName === newPos.stockName;
+
+          if (isSameData && prev.length === newPositions.length) {
+            // 检查所有持仓是否都相同
+            let allSame = true;
+            for (let i = 0; i < prev.length; i++) {
+              const p1 = prev[i];
+              const p2 = newPositions[i];
+              if (!p2 ||
+                  p1.accountId !== p2.accountId ||
+                  p1.symbol !== p2.symbol ||
+                  p1.volume !== p2.volume ||
+                  p1.marketValue !== p2.marketValue ||
+                  p1.canUseVolume !== p2.canUseVolume) {
+                allSame = false;
+                break;
+              }
+            }
+            if (allSame) return prev; // 数据完全相同，跳过更新
+          }
+        }
+
+        // 移除旧数据，添加新数据
         const others = prev.filter(p => p.accountId !== accountId);
-        // Add new positions
         return [...others, ...newPositions];
       });
-      addLog(`收到持仓更新: ${newPositions.length} 条记录`);
     });
 
     const unsubOrdersSnapshot = window.electronAPI.onOrdersSnapshot(onOrdersSnapshot);
@@ -280,10 +360,13 @@ export const App: React.FC = () => {
     const tick = ticks.length > 0 && ticks[0].symbol === symbol ? ticks[0] : null;
     if (!tick) return;
 
-    const calcPrice = calculateAutoPrice(priceType, tick, tradeSide);
-    if (calcPrice) {
-      setPrice(calcPrice);
-    }
+    const detail = window.electronAPI.getStockDetail(symbol).then(detail => {
+      const detailData = detail ? { upLimit: detail.upLimit, downLimit: detail.downLimit } : null;
+      const calcPrice = calculateAutoPrice(priceType, tick, tradeSide, detailData);
+      if (calcPrice) {
+        setPrice(calcPrice);
+      }
+    });
   }, [ticks, priceType, tradeSide, symbol]);
 
 
@@ -300,41 +383,6 @@ export const App: React.FC = () => {
     return () => clearInterval(timer);
   }, [multiAccounts]);
 
-  const fetchData = async () => {
-    // Actively request a snapshot from Python if we have accounts
-    if (multiAccounts.length > 0) {
-      const ids = multiAccounts.map(a => a.account_id);
-      addLog(`正在请求持仓与委托快照...`);
-      window.electronAPI.queryPositionsSnapshot(ids);
-      window.electronAPI.queryOrdersSnapshot(ids);
-    } else {
-      addLog(`暂无账户信息，跳过请求`);
-    }
-
-    // We can also fetch trades in parallel or sequence if needed, keeping legacy for trades for now
-    // Or if trades are also snapshotted, we would update that too. 
-    // Assuming trades are still pulled per account or need a similar update. 
-    // For now, preserving trade fetch but removing position fetch loop.
-
-    if (multiAccounts.length === 0) return;
-
-    try {
-      const allTrds: Trade[] = [];
-      for (const acc of multiAccounts) {
-        const id = acc.account_id;
-        // Fetch Trades
-        // Note: If you want to snapshot trades too, you should add a similar snapshot for trades.
-        const trdRes = await window.electronAPI.getTrades(id);
-        if (trdRes && trdRes.success && Array.isArray(trdRes.data)) {
-          allTrds.push(...trdRes.data);
-        }
-      }
-      setTrades(allTrds);
-    } catch (e: any) {
-      addLog(`同步成交数据异常: ${e.message}`);
-    }
-  };
-
   // ----------------------------------------------------------------
   // WINDOW CONTROL LOGIC
   // ----------------------------------------------------------------
@@ -348,7 +396,7 @@ export const App: React.FC = () => {
   // LOGIC
   // ----------------------------------------------------------------
 
-  const calculateAutoPrice = (mode: PriceMode, tick: TickData, side: 'BUY' | 'SELL'): string | null => {
+  const calculateAutoPrice = (mode: PriceMode, tick: TickData, side: 'BUY' | 'SELL', detail: { upLimit: number; downLimit: number } | null): string | null => {
     const curPrice = tick.lastPrice;
     const asks = tick.asks || [];
     const bids = tick.bids || [];
@@ -365,7 +413,11 @@ export const App: React.FC = () => {
           if (asks.length > 0) target = asks[0][0];
           else target = curPrice;
           break;
-        case 'CAGE': target = curPrice * 1.02; break;
+        case 'CAGE': // Buy: 当前价上浮2%，但不超过涨停价
+          if (detail) {
+            target = Math.min(curPrice * 1.02, detail.upLimit);
+          }
+          break;
         default: return null;
       }
     } else {
@@ -380,11 +432,15 @@ export const App: React.FC = () => {
           if (bids.length > 0) target = bids[0][0];
           else target = curPrice;
           break;
-        case 'CAGE': target = curPrice * 0.98; break;
+        case 'CAGE': // Sell: 当前价下浮2%，但不低于跌停价
+          if (detail) {
+            target = Math.max(curPrice * 0.98, detail.downLimit);
+          }
+          break;
         default: return null;
       }
     }
-    return target.toFixed(2);
+    return target > 0 ? target.toFixed(2) : null;
   };
 
   const handleSymbolChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -402,12 +458,10 @@ export const App: React.FC = () => {
 
     const code = val.split('.')[0];
     if (code.length === 6) {
-      // Fetch Real-time Stock Detail from Main Process
       const detail = await window.electronAPI.getStockDetail(val);
       if (detail) {
         setStockName(detail.name);
       } else {
-        // Fallback or still typing
         const name = STOCK_MAP[code] || "未知";
         setStockName(name);
       }
@@ -473,14 +527,17 @@ export const App: React.FC = () => {
     setVolStrategy({ type: 'MANUAL', value: e.target.value });
   };
 
-  const handlePricePreset = (type: PriceMode) => {
+  const handlePricePreset = async (type: PriceMode) => {
     setPriceType(type);
+
+    const detail = await window.electronAPI.getStockDetail(symbol);
+    const detailData = detail ? { upLimit: detail.upLimit, downLimit: detail.downLimit } : null;
+
     if (currentTick) {
-      const p = calculateAutoPrice(type, currentTick, tradeSide);
+      const p = calculateAutoPrice(type, currentTick, tradeSide, detailData);
       if (p) setPrice(p);
     } else {
-      // Fallback if no tick
-      const p = calculateAutoPrice(type, { lastPrice: parseFloat(price) || 0, asks: [], bids: [], volume: 0, time: '', symbol: '' }, tradeSide);
+      const p = calculateAutoPrice(type, { lastPrice: parseFloat(price) || 0, asks: [], bids: [], volume: 0, time: '', symbol: '' }, tradeSide, detailData);
       if (p) setPrice(p);
     }
   };
@@ -496,14 +553,39 @@ export const App: React.FC = () => {
   const handleSubmitOrder = async (action: 'BUY' | 'SELL') => {
     if (isSubmitting) return;
     if (selectedAccountIds.length === 0) {
-      addLog("错误: 请至少选择一个账户");
+      setErrorMessage("请至少选择一个账户");
       return;
+    }
+
+    // 验证股票代码格式
+    const code = symbol.split('.')[0];
+    if (!/^\d{6}$/.test(code)) {
+      setErrorMessage("股票代码格式不正确");
+      return;
+    }
+
+    // 解析价格
+    const p = parseFloat(price) || currentPrice;
+    if (!p || p <= 0) {
+      setErrorMessage("价格必须为正数");
+      return;
+    }
+
+    // 检查涨跌停限制
+    const detail = await window.electronAPI.getStockDetail(symbol);
+    if (detail) {
+      if (action === 'BUY' && p > detail.upLimit) {
+        setErrorMessage(`买入价 ${p.toFixed(2)} 超过涨停价 ${detail.upLimit.toFixed(2)}`);
+        return;
+      }
+      if (action === 'SELL' && p < detail.downLimit) {
+        setErrorMessage(`卖出价 ${p.toFixed(2)} 低于跌停价 ${detail.downLimit.toFixed(2)}`);
+        return;
+      }
     }
 
     setIsSubmitting(true);
     try {
-      const p = parseFloat(price) || currentPrice;
-
       addLog(`启动批量下单: 共 ${selectedAccountIds.length} 个账户`);
 
       const promises = selectedAccountIds.map(async (accId) => {
@@ -571,16 +653,12 @@ export const App: React.FC = () => {
   };
 
   const handleSelectAllOrders = () => {
-    if (selectedOrderIds.length === orders.length && orders.length > 0) {
+    const allIds = orders.map(o => getOrderUniqueKey(o));
+    if (selectedOrderIds.length === allIds.length && orders.length > 0) {
       setSelectedOrderIds([]);
     } else {
-      setSelectedOrderIds(orders.map(o => o.orderId));
+      setSelectedOrderIds(allIds);
     }
-  };
-
-  const handleInvertOrderSelection = () => {
-    const allIds = orders.map(o => o.orderId);
-    setSelectedOrderIds(prev => allIds.filter(id => !prev.includes(id)));
   };
 
   const handleCancelSelectedOrders = async () => {
@@ -681,15 +759,18 @@ export const App: React.FC = () => {
 
     const asks = currentTick.asks || [];
     const bids = currentTick.bids || [];
-    const reversedAsks = [...asks].slice(0, 5).reverse();
-    const visibleBids = [...bids].slice(0, 5);
-    const maxVol = Math.max(...asks.map(a => a[1]), ...bids.map(b => b[1]), 1);
+    const reversedAsks = asks.length > 0 ? [...asks].slice(0, 5).reverse() : [];
+    const visibleBids = bids.length > 0 ? [...bids].slice(0, 5) : [];
+    const maxVol = asks.length > 0 || bids.length > 0 ? Math.max(...asks.map(a => a[1]), ...bids.map(b => b[1]), 1) : 1;
+
+    const formatPrice = (price: number) => price > 0 ? price.toFixed(2) : '--';
+    const formatVol = (vol: number) => vol > 0 ? vol : '--';
 
     return (
       <div className="flex flex-col h-full font-mono text-xs select-none">
         {/* ASKS (Sell - Blue) */}
         <div className="flex-1 flex flex-col justify-end mb-2 space-y-0.5">
-          {reversedAsks.map((ask, i) => {
+          {reversedAsks.length > 0 ? reversedAsks.map((ask, i) => {
             const level = 5 - i;
             const width = Math.min((ask[1] / maxVol) * 100, 100);
             return (
@@ -700,11 +781,17 @@ export const App: React.FC = () => {
               >
                 <div className="absolute top-0 bottom-0 right-0 bg-blue-500/10" style={{ width: `${width}%` }} />
                 <span className={`relative z-10 w-8 ${colors.textMuted} opacity-70`}>卖 {level}</span>
-                <span className="relative z-10 text-blue-600 font-medium">{ask[0].toFixed(2)}</span>
-                <span className={`relative z-10 w-12 text-right ${colors.textMuted}`}>{ask[1]}</span>
+                <span className="relative z-10 text-blue-600 font-medium">{formatPrice(ask[0])}</span>
+                <span className={`relative z-10 w-12 text-right ${colors.textMuted}`}>{formatVol(ask[1])}</span>
               </div>
             );
-          })}
+          }) : (
+            <div className="flex justify-between px-2 py-1.5 text-gray-400">
+              <span>卖 --</span>
+              <span>--</span>
+              <span>--</span>
+            </div>
+          )}
         </div>
 
         {/* Divider */}
@@ -712,7 +799,7 @@ export const App: React.FC = () => {
 
         {/* BIDS (Buy - Red) */}
         <div className="flex-1 flex flex-col justify-start mt-1 space-y-0.5">
-          {visibleBids.map((bid, i) => {
+          {visibleBids.length > 0 ? visibleBids.map((bid, i) => {
             const level = i + 1;
             const width = Math.min((bid[1] / maxVol) * 100, 100);
             return (
@@ -723,11 +810,17 @@ export const App: React.FC = () => {
               >
                 <div className="absolute top-0 bottom-0 right-0 bg-red-500/10" style={{ width: `${width}%` }} />
                 <span className={`relative z-10 w-8 ${colors.textMuted} opacity-70`}>买 {level}</span>
-                <span className="relative z-10 text-red-600 font-medium">{bid[0].toFixed(2)}</span>
-                <span className={`relative z-10 w-12 text-right ${colors.textMuted}`}>{bid[1]}</span>
+                <span className="relative z-10 text-red-600 font-medium">{formatPrice(bid[0])}</span>
+                <span className={`relative z-10 w-12 text-right ${colors.textMuted}`}>{formatVol(bid[1])}</span>
               </div>
             );
-          })}
+          }) : (
+            <div className="flex justify-between px-2 py-1.5 text-gray-400">
+              <span>买 --</span>
+              <span>--</span>
+              <span>--</span>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -885,68 +978,83 @@ export const App: React.FC = () => {
     );
   };
 
-  const renderPositionsTableContent = () => (
-    <div className="flex-1 overflow-y-auto">
-      <table className="w-full text-left border-collapse">
-        <thead className="bg-gray-50 sticky top-0 z-10">
-          <tr>
-            <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">账户</th>
-            <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">代码/名称</th>
-            <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">持仓/可用</th>
-            <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">现价/成本</th>
-            <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">市值</th>
-            <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">盈亏</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-gray-200 bg-white">
-          {positions.length === 0 ? (
+  const renderPositionsTableContent = () => {
+    return (
+      <div className="flex-1 overflow-y-auto">
+        <table className="w-full text-left border-collapse">
+          <thead className="bg-gray-50 sticky top-0 z-10">
             <tr>
-              <td colSpan={6} className="px-6 py-12 text-center text-gray-400 text-sm">暂无持仓数据</td>
+              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">账户</th>
+              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">代码/名称</th>
+              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">持仓/可用</th>
+              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">现价/成本</th>
+              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">市值</th>
+              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">盈亏</th>
             </tr>
-          ) : (
-            sortData(positions).map((pos, idx) => {
-              // Find current price for this symbol if available
-              const tick = ticks.find(t => t.symbol === pos.symbol);
-              const curPrice = tick ? tick.lastPrice : pos.openPrice; // fallback
-              const profit = (curPrice - pos.openPrice) * pos.volume;
-              const profitPercent = pos.openPrice > 0 ? (profit / (pos.openPrice * pos.volume)) * 100 : 0;
+          </thead>
+          <tbody className="divide-y divide-gray-200 bg-white">
+            {positions.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="px-6 py-12 text-center text-gray-400 text-sm">暂无持仓数据</td>
+              </tr>
+            ) : (
+              positions.map((pos) => {
+                const tick = ticks.find(t => t.symbol === pos.symbol);
+                const curPrice = (tick?.lastPrice ?? pos.openPrice ?? 0);
+                const profit = (curPrice - (pos.openPrice ?? 0)) * pos.volume;
+                const profitPercent = (pos.openPrice ?? 0) > 0 ? (profit / ((pos.openPrice ?? 0) * pos.volume)) * 100 : 0;
 
-              return (
-                <tr key={`${pos.accountId}-${pos.symbol}-${idx}`} className="hover:bg-blue-50 transition-colors cursor-pointer group" onClick={() => { setSymbol(pos.symbol); window.electronAPI.setFocusSymbol(pos.symbol); }}>
-                  <td className="px-6 py-3">
-                    <div className="text-xs font-bold text-gray-500">{pos.accountId}</div>
-                  </td>
-                  <td className="px-6 py-3">
-                    <div className="text-sm font-bold text-gray-900">{pos.stockName}</div>
-                    <div className="text-xs font-mono text-gray-400">{pos.symbol}</div>
-                  </td>
-                  <td className="px-6 py-3 text-right">
-                    <div className="text-sm font-bold text-gray-900">{pos.volume}</div>
-                    <div className="text-xs font-bold text-blue-600">可卖 {pos.canUseVolume}</div>
-                  </td>
-                  <td className="px-6 py-3 text-right">
-                    <div className={`text-sm font-mono font-bold ${curPrice > pos.openPrice ? 'text-red-600' : curPrice < pos.openPrice ? 'text-green-600' : 'text-gray-900'}`}>{curPrice.toFixed(2)}</div>
-                    <div className="text-xs font-mono text-gray-400">{pos.openPrice.toFixed(2)}</div>
-                  </td>
-                  <td className="px-6 py-3 text-right">
-                    <div className="text-sm font-mono font-bold text-gray-900">{pos.marketValue.toLocaleString()}</div>
-                  </td>
-                  <td className="px-6 py-3 text-right">
-                    <div className={`text-sm font-mono font-bold ${profit >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                      {profit >= 0 ? '+' : ''}{profit.toLocaleString()}
-                    </div>
-                    <div className={`text-xs font-mono font-bold ${profit >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                      {profit >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%
-                    </div>
-                  </td>
-                </tr>
-              );
-            })
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
+                return (
+                  <tr key={`${pos.accountId}-${pos.symbol}`} className="hover:bg-blue-50 transition-colors cursor-pointer group" onClick={async () => {
+                    let val = pos.symbol;
+                    if (!val.includes('.')) {
+                      if (val.startsWith('6') || val.startsWith('9')) val += '.SH';
+                      else if (val.startsWith('0') || val.startsWith('3')) val += '.SZ';
+                      else if (val.startsWith('8') || val.startsWith('4')) val += '.BJ';
+                    }
+                    setSymbol(val);
+                    setTradeSide('SELL');
+                    window.electronAPI.setFocusSymbol(val);
+                    const detail = await window.electronAPI.getStockDetail(val);
+                    if (detail) {
+                      setStockName(detail.name);
+                    }
+                  }}>
+                    <td className="px-6 py-3">
+                      <div className="text-xs font-bold text-gray-500">{pos.accountId}</div>
+                    </td>
+                    <td className="px-6 py-3">
+                      <div className="text-sm font-bold text-gray-900">{pos.stockName}</div>
+                      <div className="text-xs font-mono text-gray-400">{pos.symbol}</div>
+                    </td>
+                    <td className="px-6 py-3 text-right">
+                      <div className="text-sm font-bold text-gray-900">{pos.volume}</div>
+                      <div className="text-xs font-bold text-blue-600">可卖 {pos.canUseVolume}</div>
+                    </td>
+                    <td className="px-6 py-3 text-right">
+                      <div className={`text-sm font-mono font-bold ${curPrice > (pos.openPrice ?? 0) ? 'text-red-600' : curPrice < (pos.openPrice ?? 0) ? 'text-green-600' : 'text-gray-900'}`}>{curPrice.toFixed(2)}</div>
+                      <div className="text-xs font-mono text-gray-400">{(pos.openPrice ?? 0).toFixed(2)}</div>
+                    </td>
+                    <td className="px-6 py-3 text-right">
+                      <div className="text-sm font-mono font-bold text-gray-900">{pos.marketValue.toLocaleString()}</div>
+                    </td>
+                    <td className="px-6 py-3 text-right">
+                      <div className={`text-sm font-mono font-bold ${profit >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {profit >= 0 ? '+' : ''}{profit.toLocaleString()}
+                      </div>
+                      <div className={`text-xs font-mono font-bold ${profit >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        {profit >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
 
   const renderTableList = (columns: any[], data: any[], rowRenderer: any) => (
     <div className={`h-full w-full flex flex-col p-8 pt-12`}>
@@ -982,13 +1090,6 @@ export const App: React.FC = () => {
             className="px-4 py-1.5 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
           >
             全选
-          </button>
-          <div className="w-px h-4 bg-gray-200 my-auto" />
-          <button
-            onClick={handleInvertOrderSelection}
-            className="px-4 py-1.5 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            反选
           </button>
         </div>
 
@@ -1033,15 +1134,15 @@ export const App: React.FC = () => {
             />
           </div>
           {[
-            { label: "时间", sortKey: "orderTime", className: "w-32" },
-            { label: "账户", sortKey: "accountId", className: "w-32" },
-            { label: "合同号", sortKey: "orderSysId", className: "w-36" },
-            { label: "代码", sortKey: "symbol", className: "w-32" },
-            { label: "名称", className: "w-32" },
-            { label: "方向", sortKey: "action", className: "w-24", align: "center" },
-            { label: "价格", sortKey: "price", align: "right", className: "w-28" },
-            { label: "数量", sortKey: "volume", align: "right", className: "w-36" },
-            { label: "状态", sortKey: "status", align: "center", className: "w-32" },
+            { label: "时间", sortKey: "orderTime", className: "w-36" },
+            { label: "账户", sortKey: "accountId", className: "w-36" },
+            { label: "合同号", sortKey: "orderSysId", className: "w-48" },
+            { label: "代码", sortKey: "symbol", className: "w-36" },
+            { label: "名称", className: "w-40" },
+            { label: "方向", sortKey: "action", className: "w-28", align: "center" },
+            { label: "价格", sortKey: "price", align: "right", className: "w-32" },
+            { label: "数量", sortKey: "volume", align: "right", className: "w-40" },
+            { label: "状态", sortKey: "status", align: "center", className: "w-36" },
             { label: "说明", className: "flex-1" },
           ].map((col: any, i: number) => (
             <div key={i} className={`${col.className} px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider`}>
@@ -1095,20 +1196,20 @@ export const App: React.FC = () => {
                       onChange={() => { }}
                     />
                   </div>
-                  {cell(<div className="text-xs font-mono text-gray-400">{o.orderTime?.split(' ')[1] || o.orderTime || '--'}</div>, "w-28")}
-                  {cell(<div className="font-bold text-gray-400 text-xs">{o.accountId}</div>, "w-24")}
-                  {cell(<div className="font-mono text-gray-600 text-xs">{o.orderSysId}</div>, "w-28")}
-                  {cell(<div className="font-mono font-bold text-gray-800">{o.symbol}</div>, "w-28")}
-                  {cell(<div className="font-medium text-gray-700">{o.stockName}</div>, "w-24")}
-                  {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${o.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{o.action === 'BUY' ? '买入' : '卖出'}</div>, "w-20", "center")}
-                  {cell(<div className="font-mono text-gray-600">{o.price.toFixed(2)}</div>, "w-24", "right")}
-                  {cell(<div className="font-mono text-gray-600">{o.filledVolume}/{o.volume}</div>, "w-28", "right")}
+                  {cell(<div className="text-xs font-mono text-gray-400">{o.orderTime?.split(' ')[1] || o.orderTime || '--'}</div>, "w-36")}
+                  {cell(<div className="font-bold text-gray-400 text-xs">{o.accountId}</div>, "w-36")}
+                  {cell(<div className="font-mono text-gray-600 text-xs">{o.orderSysId}</div>, "w-48")}
+                  {cell(<div className="font-mono font-bold text-gray-800">{o.symbol}</div>, "w-36")}
+                  {cell(<div className="font-medium text-gray-700 truncate">{o.stockName}</div>, "w-40")}
+                  {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${o.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{o.action === 'BUY' ? '买入' : '卖出'}</div>, "w-28", "center")}
+                  {cell(<div className="font-mono text-gray-600">{o.price.toFixed(2)}</div>, "w-32", "right")}
+                  {cell(<div className="font-mono text-gray-600">{o.filledVolume}/{o.volume}</div>, "w-40", "right")}
                   {cell(<span className={`px-2 py-1 rounded text-[10px] font-bold 
                     ${(o.status === 'FILLED' || o.status === 'PART_SUCC') ? 'bg-green-100 text-green-700' :
                       (o.status === 'CANCELED' || o.status === 'PART_CANCEL' || o.status === 'PARTSUCC_CANCEL' || o.status === 'REPORTED_CANCEL') ? 'bg-yellow-100 text-yellow-700' :
                         (o.status === 'JUNK' || o.status === 'REJECTED') ? 'bg-red-100 text-red-700' :
                           'bg-blue-50 text-blue-600'
-                    }`}>{o.status}</span>, "w-28", "center")}
+                    }`}>{o.status}</span>, "w-36", "center")}
                   {cell(<div className="text-xs text-gray-400 truncate">{o.msg}</div>, "flex-1")}
                 </div>
               );
@@ -1421,6 +1522,29 @@ export const App: React.FC = () => {
         <div className="flex-1 overflow-hidden relative">
           {renderPositionsTableContent()}
         </div>
+
+        {/* Error Modal */}
+        {errorMessage && (
+          <div className="absolute inset-0 z-[100] bg-black/40 backdrop-blur-sm flex items-center justify-center fade-in">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-[360px] transform scale-100 transition-all border border-gray-200">
+              <div className="text-center">
+                <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-6 h-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-bold text-gray-900 mb-2">操作失败</h3>
+                <p className="text-sm text-gray-500 mb-6">{errorMessage}</p>
+                <button
+                  onClick={() => setErrorMessage(null)}
+                  className="w-full py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-lg shadow-blue-500/30 transition-colors"
+                >
+                  确定
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
