@@ -6,12 +6,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAccount: (accountId: string) => ipcRenderer.invoke('trade:account', accountId),
   getPositions: (accountId: string) => ipcRenderer.invoke('trade:positions', accountId),
   getTrades: (accountId: string) => ipcRenderer.invoke('trade:trades', accountId),
-  cancelOrder: (accountId: string, orderId: string) => ipcRenderer.invoke('trade:cancel-order', accountId, orderId),
+  cancelOrder: (accountId: string, orderSysId: string, marketType: string) => ipcRenderer.invoke('trade:cancel-order', accountId, orderSysId, marketType),
   setFocusSymbol: (symbol: string) => ipcRenderer.send('trade:set-focus', symbol),
   getTickSnapshot: (symbol: string) => ipcRenderer.invoke('trade:get-tick', symbol),
   getStockDetail: (symbol: string) => ipcRenderer.invoke('trade:get-stock-detail', symbol),
   queryPositionsSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-positions-snapshot', accountIds),
   queryOrdersSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-orders-snapshot', accountIds),
+  queryTradesSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-trades-snapshot', accountIds),
 
   // Listeners (Return cleanup functions)
   onTick: (callback: any) => {
@@ -48,6 +49,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const subscription = (_: any, data: any) => callback(data);
     ipcRenderer.on('push:orders-snapshot', subscription);
     return () => ipcRenderer.removeListener('push:orders-snapshot', subscription);
+  },
+  onTradesSnapshot: (callback: (data: any[]) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:trades-snapshot', subscription);
+    return () => ipcRenderer.removeListener('push:trades-snapshot', subscription);
+  },
+  onAllTicks: (callback: (data: Record<string, any>) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:all-ticks', subscription);
+    return () => ipcRenderer.removeListener('push:all-ticks', subscription);
   },
 
   // Window Controls

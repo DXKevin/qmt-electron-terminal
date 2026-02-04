@@ -19,10 +19,13 @@ let managedAccountIds: string[] = [];
 let assetPollingInterval: NodeJS.Timeout | null = null;
 const globalAssetsMap = new Map<string, any>();
 
+// Trades Cache
+const tradesMap = new Map<string, any>();
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1660,
-    height: 1200,
+    height: 1300,
     minWidth: 1200,
     minHeight: 800,
     backgroundColor: '#111827',
@@ -94,17 +97,15 @@ function createWindow() {
 
       // 2. Storage logic (Cache everything)
       tickMap.set(symbol, tick);
-
-      // 3. Selective Push (Only push the one we are looking at)
-      if (symbol === focusSymbol) {
-        safeSend('push:tick', tick);
-      }
     }
+
+    // 发送所有股票的最新行情数据给渲染进程
+    safeSend('push:all-ticks', Object.fromEntries(tickMap));
   });
 
   bridge.on('order_update', (data) => safeSend('push:order', data));
   bridge.on('orders_snapshot', (data: any) => {
-    console.log("[Main] Received orders_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
+    // console.log("[Main] Received orders_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
 
     const rawList = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
 
@@ -152,7 +153,7 @@ function createWindow() {
     safeSend('push:orders-snapshot', cleanList);
   });
   bridge.on('account_infos', (data: any[]) => {
-    console.log(`[Main] account_infos event received. Count: ${data?.length}`);
+    // console.log(`[Main] account_infos event received. Count: ${data?.length}`);
     // 1. Forward to frontend
     safeSend('push:accounts', data);
 
@@ -160,18 +161,18 @@ function createWindow() {
     const newIds = (Array.isArray(data) ? data : []).map(acc => acc.account_id).filter(Boolean);
     managedAccountIds = [...new Set([...managedAccountIds, ...newIds])];
 
-    console.log(`[Main] Managed accounts for polling: [${managedAccountIds.join(', ')}]`);
+    // console.log(`[Main] Managed accounts for polling: [${managedAccountIds.join(', ')}]`);
 
     if (managedAccountIds.length > 0 && !assetPollingInterval) {
-      console.log(`[Main] Initializing Asset Polling Timer (6s interval)...`);
+      // console.log(`[Main] Initializing Asset Polling Timer (6s interval)...`);
       assetPollingInterval = setInterval(() => {
         if (!bridge) return;
-        console.log(`[Main] [Polling-Tick] Triggering query for ${managedAccountIds.length} accounts`);
+        // console.log(`[Main] [Polling-Tick] Triggering query for ${managedAccountIds.length} accounts`);
         managedAccountIds.forEach((id, index) => {
           // Stagger requests slightly to avoid pipe saturation
           setTimeout(() => {
             if (!bridge) return;
-            console.log(`[Main] [Polling-Task] Sending query_assets for: ${id}`);
+            // console.log(`[Main] [Polling-Task] Sending query_assets for: ${id}`);
             (bridge as any).sendNotify(ActionType.QUERY_ASSETS, { account_id: id });
           }, index * 200);
         });
@@ -187,7 +188,7 @@ function createWindow() {
   bridge.on('assets_snapshot', (dataArray: any) => {
     // Backend gives data: [{'account_id': '...', ...}]
     const list = Array.isArray(dataArray) ? dataArray : [];
-    console.log(`[Main] [DATA] assets_snapshot received. Items: ${list.length}`);
+    // console.log(`[Main] [DATA] assets_snapshot received. Items: ${list.length}`);
 
     let hasChanged = false;
     list.forEach(raw => {
@@ -224,13 +225,12 @@ function createWindow() {
         downLimit: si.DownStopPrice
       });
     }
-    console.log(`[Main] Stock details updated: ${stockDetailMap.size} stocks.`);
-    console.log(`[Main] Stock details updated: ${stockDetailMap.size} stocks.`);
+    // console.log(`[Main] Stock details updated: ${stockDetailMap.size} stocks.`);
   });
 
   bridge.on('positions_snapshot', (data: any) => {
     // bridge.ts emits `msg.data` directly, so `data` is the array of positions
-    console.log("[Main] Received positions_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
+    // console.log("[Main] Received positions_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
 
     // Fallback: if for some reason it's the full object (future proofing), check data property
     const rawList = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
@@ -250,6 +250,72 @@ function createWindow() {
     });
 
     safeSend('push:positions-snapshot', cleanList);
+  });
+
+  bridge.on('trades_snapshot', (data: any) => {
+    // console.log("[Main] Received trades_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
+
+    const rawList = Array.isArray(data) ? data : (data && Array.isArray(data.data) ? data.data : []);
+
+    // 增量合并到全局缓存（去重）
+    rawList.forEach((item: any) => {
+      const tradeId = item.trade_id || String(item.order_id);
+      if (tradeId) {
+        tradesMap.set(tradeId, item);
+      }
+    });
+
+    // 转换所有缓存数据为格式化列表
+    const cleanList = Array.from(tradesMap.values()).map((item: any) => {
+      const detail = stockDetailMap.get(item.symbol);
+
+      // offset_flag: 48 = 买入, 49 = 卖出
+      const action = item.offset_flag === 48 ? 'BUY' : 'SELL';
+
+      // 时间戳处理
+      const tradedTime = item.traded_time || 0;
+      const timeStr = tradedTime ? new Date(tradedTime * 1000).toLocaleTimeString() : '';
+
+      return {
+        tradeId: item.trade_id || String(item.order_id),
+        tradeTimestamp: tradedTime,
+        tradeTime: timeStr,
+        accountId: item.account_id,
+        symbol: item.symbol,
+        stockName: detail ? detail.name : item.symbol,
+        action: action,
+        price: item.traded_price || 0,
+        volume: item.traded_volume || 0,
+        amount: item.traded_amount || 0
+      };
+    });
+
+    // 按时间戳降序排序（最新在前），同时间按tradeId排序（稳定）
+    cleanList.sort((a, b) => {
+      if (b.tradeTimestamp !== a.tradeTimestamp) {
+        return b.tradeTimestamp - a.tradeTimestamp;
+      }
+      return b.tradeId.localeCompare(a.tradeId);
+    });
+
+    // 限制最大数量，防止内存溢出
+    const MAX_TRADES = 2000;
+    const trimmedList = cleanList.slice(0, MAX_TRADES);
+
+    // 清理超出部分的数据
+    if (cleanList.length > MAX_TRADES) {
+      const removedIds = cleanList.slice(MAX_TRADES).map(t => t.tradeId);
+      removedIds.forEach(id => tradesMap.delete(id));
+    }
+
+    // 调试日志
+    // console.log("[Main] Trades merged:", {
+    //   total: trimmedList.length,
+    //   latest: trimmedList[0]?.tradeTime,
+    //   oldest: trimmedList[trimmedList.length - 1]?.tradeTime
+    // });
+
+    safeSend('push:trades-snapshot', trimmedList);
   });
 
   bridge.on('log', (msg) => safeSend('push:log', msg));
@@ -281,10 +347,10 @@ app.whenReady().then(() => {
     // Use provided IDs or fallback to known managed IDs
     const targets = (accountIds && accountIds.length > 0) ? accountIds : managedAccountIds;
 
-    console.log(`[Main] Requesting positions snapshot for ${targets.length} accounts...`);
+    // console.log(`[Main] Requesting positions snapshot for ${targets.length} accounts...`);
 
     if (targets.length === 0) {
-      console.warn("[Main] No accounts to query positions for.");
+      // console.warn("[Main] No accounts to query positions for.");
       return;
     }
 
@@ -303,16 +369,35 @@ app.whenReady().then(() => {
     // Use provided IDs or fallback to known managed IDs
     const targets = (accountIds && accountIds.length > 0) ? accountIds : managedAccountIds;
 
-    console.log(`[Main] Requesting orders snapshot for ${targets.length} accounts...`);
+    // console.log(`[Main] Requesting orders snapshot for ${targets.length} accounts...`);
 
     if (targets.length === 0) {
-      console.warn("[Main] No accounts to query orders for.");
+      // console.warn("[Main] No accounts to query orders for.");
       return;
     }
 
     targets.forEach((id, idx) => {
       setTimeout(() => {
         (bridge as any).sendNotify(ActionType.QUERY_ORDERS, { account_id: id });
+      }, idx * 50);
+    });
+  });
+
+  ipcMain.handle('trade:query-trades-snapshot', async (_, accountIds?: string[]) => {
+    if (!bridge) return;
+
+    const targets = (accountIds && accountIds.length > 0) ? accountIds : managedAccountIds;
+
+    // console.log(`[Main] Requesting trades snapshot for ${targets.length} accounts...`);
+
+    if (targets.length === 0) {
+      // console.warn("[Main] No accounts to query trades for.");
+      return;
+    }
+
+    targets.forEach((id, idx) => {
+      setTimeout(() => {
+        (bridge as any).sendNotify(ActionType.QUERY_TRADES, { account_id: id });
       }, idx * 50);
     });
   });
@@ -326,13 +411,19 @@ app.whenReady().then(() => {
   // 4. Order
   ipcMain.handle('trade:order', async (_, order: OrderRequest) => {
     if (!bridge) return { success: false, error: "主进程未就绪" };
-    return bridge.sendRequest(ActionType.PLACE_ORDER, order);
+    const success = bridge.sendNotify(ActionType.PLACE_ORDER, order);
+    return { success };
   });
 
   // 6. Cancel Order
-  ipcMain.handle('trade:cancel-order', async (_, accountId: string, orderId: string) => {
+  ipcMain.handle('trade:cancel-order', async (_, accountId: string, orderSysId: string, marketType: string) => {
     if (!bridge) return { success: false, error: "主进程未就绪" };
-    return bridge.sendRequest(ActionType.CANCEL_ORDER, { account_id: accountId, order_id: orderId });
+    const success = bridge.sendNotify(ActionType.CANCEL_ORDER, {
+      account_id: accountId,
+      order_sysid: orderSysId,
+      market_type: marketType
+    });
+    return { success };
   });
 
   // 7. Focus Management

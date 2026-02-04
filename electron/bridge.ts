@@ -186,15 +186,18 @@ export class PythonBridge extends EventEmitter {
 
   /**
    * 仅发送通知，不等待结果 (Fire-and-Forget)
+   * @returns boolean - true 表示写入管道成功，false 表示失败
    */
-  public sendNotify(action: string, params: any) {
-    if (!this.reqStream || !this.isReqConnected) return;
+  public sendNotify(action: string, params: any): boolean {
+    if (!this.reqStream || !this.isReqConnected) return false;
     try {
       // req_id = null 表示这是一个通知
       const payload = { action, req_id: null, params };
       this.reqStream.write(Protocol.encode(payload));
+      return true;
     } catch (e) {
       console.error("[Bridge] Send notify failed", e);
+      return false;
     }
   }
 

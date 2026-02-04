@@ -67,7 +67,10 @@ export interface Position {
 }
 
 export interface Trade {
-  time: string;
+  tradeTimestamp: number;
+  tradeTime: string;
+  tradeId: string;
+  accountId: string;
   symbol: string;
   stockName: string;
   action: 'BUY' | 'SELL';
@@ -117,20 +120,23 @@ export interface IElectronAPI {
   getAccount: (accountId: string) => Promise<ApiResponse<AccountInfo>>;
   getPositions: (accountId: string) => Promise<ApiResponse<Position[]>>;
   getTrades: (accountId: string) => Promise<ApiResponse<Trade[]>>;
-  cancelOrder: (accountId: string, orderId: string) => Promise<ApiResponse<any>>;
+  cancelOrder: (accountId: string, orderSysId: string, marketType: 'sh' | 'sz') => Promise<ApiResponse<any>>;
   setFocusSymbol: (symbol: string) => void;
   getTickSnapshot: (symbol: string) => Promise<TickData | null>;
 
   onTick: (callback: (data: TickData) => void) => () => void;
+  onAllTicks: (callback: (data: Record<string, TickData>) => void) => () => void;
   onOrderUpdate: (callback: (data: OrderStatus) => void) => () => void;
   onSystemLog: (callback: (msg: string) => void) => () => void;
   onAccounts: (callback: (accounts: MultiAccountInfo[]) => void) => () => void;
   onAssetsSnapshot: (callback: (assets: any[]) => void) => () => void;
   onPositionsSnapshot: (callback: (positions: Position[]) => void) => () => void;
   onOrdersSnapshot: (callback: (orders: OrderStatus[]) => void) => () => void;
+  onTradesSnapshot: (callback: (trades: Trade[]) => void) => () => void;
   getStockDetail: (symbol: string) => Promise<StockDetail | null>;
   queryPositionsSnapshot: (accountIds?: string[]) => Promise<void>;
   queryOrdersSnapshot: (accountIds?: string[]) => Promise<void>;
+  queryTradesSnapshot: (accountIds?: string[]) => Promise<void>;
 
   // Window Controls
   minimizeWindow: () => Promise<void>;

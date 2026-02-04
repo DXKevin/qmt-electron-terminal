@@ -77,8 +77,8 @@ if (!window.electronAPI) {
       return {
         success: true,
         data: [
-          { time: "09:30:05", symbol: "600000.SH", stockName: "浦发银行", action: 'BUY', price: 9.80, volume: 1000, amount: 9800 },
-          { time: "09:35:12", symbol: "000001.SZ", stockName: "平安银行", action: 'SELL', price: 12.50, volume: 500, amount: 6250 },
+          { tradeTimestamp: 1770168300, tradeTime: "09:30:05", tradeId: "T001", accountId: "888001", symbol: "600000.SH", stockName: "浦发银行", action: 'BUY', price: 9.80, volume: 1000, amount: 9800 },
+          { tradeTimestamp: 1770168305, tradeTime: "09:35:12", tradeId: "T002", accountId: "888001", symbol: "000001.SZ", stockName: "平安银行", action: 'SELL', price: 12.50, volume: 500, amount: 6250 },
         ]
       };
     },
