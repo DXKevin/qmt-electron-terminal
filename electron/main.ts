@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import path from 'path';
+import { spawn, ChildProcess } from 'child_process';
 import { PythonBridge } from './bridge';
 import { OrderRequest, ActionType } from '../types';
 
@@ -8,6 +9,31 @@ declare const process: any;
 
 let mainWindow: BrowserWindow | null = null;
 let bridge: PythonBridge | null = null;
+
+// Python backend process
+let pythonProcess: ChildProcess | null = null;
+
+function getPythonExePath(): string {
+  if (app.isPackaged) {
+    return path.join(process.resourcesPath, 'qmtpropy', 'qmtpropy.exe');
+  } else {
+    return path.join(__dirname, '../../qmtpropy/qmtpropy.exe');
+  }
+}
+
+function startPythonBackend() {
+  const exePath = getPythonExePath();
+  console.log('[Main] 启动 Python 后端:', exePath);
+
+  pythonProcess = spawn(exePath, {
+    detached: false,
+    stdio: 'ignore',
+    cwd: path.dirname(exePath)
+  });
+
+  pythonProcess.unref();
+  console.log('[Main] Python 后端已启动');
+}
 
 // Tick Cache & Focus logic
 const tickMap = new Map<string, any>();
@@ -21,6 +47,31 @@ const globalAssetsMap = new Map<string, any>();
 
 // Trades Cache
 const tradesMap = new Map<string, any>();
+
+// Accounts Cache
+let cachedAccounts: any[] = [];
+
+// Asset polling timer function
+function startAssetPolling() {
+  if (managedAccountIds.length === 0 || assetPollingInterval) return;
+
+  console.log(`[Main] Initializing Asset Polling Timer for ${managedAccountIds.length} accounts...`);
+
+  assetPollingInterval = setInterval(() => {
+    if (!bridge) return;
+    managedAccountIds.forEach((id, index) => {
+      setTimeout(() => {
+        if (!bridge) return;
+        (bridge as any).sendNotify(ActionType.QUERY_ASSETS, { account_id: id });
+      }, index * 200);
+    });
+  }, 6000);
+
+  // Initial trigger
+  managedAccountIds.forEach((id, index) => {
+    setTimeout(() => (bridge as any).sendNotify(ActionType.QUERY_ASSETS, { account_id: id }), index * 200);
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -104,6 +155,11 @@ function createWindow() {
   });
 
   bridge.on('order_update', (data) => safeSend('push:order', data));
+  bridge.on('trade_update', (data) => safeSend('push:trade-update', data));
+  bridge.on('order_async_response', (data) => safeSend('push:order-async-response', data));
+  bridge.on('cancel_order_async_response', (data) => safeSend('push:cancel-order-async-response', data));
+  bridge.on('order_update_error', (data) => safeSend('push:order-update-error', data));
+  bridge.on('cancel_order_update_error', (data) => safeSend('push:cancel-order-update-error', data));
   bridge.on('orders_snapshot', (data: any) => {
     // console.log("[Main] Received orders_snapshot data:", Array.isArray(data) ? `Array(${data.length})` : typeof data);
 
@@ -153,36 +209,17 @@ function createWindow() {
     safeSend('push:orders-snapshot', cleanList);
   });
   bridge.on('account_infos', (data: any[]) => {
-    // console.log(`[Main] account_infos event received. Count: ${data?.length}`);
-    // 1. Forward to frontend
+    console.log(`[Main] account_infos event received. Count: ${data?.length}`);
+    // 1. Cache accounts
+    cachedAccounts = Array.isArray(data) ? data : [];
+    // 2. Forward to frontend
     safeSend('push:accounts', data);
 
-    // 2. Start polling for these accounts
+    // 3. Start polling for these accounts
     const newIds = (Array.isArray(data) ? data : []).map(acc => acc.account_id).filter(Boolean);
     managedAccountIds = [...new Set([...managedAccountIds, ...newIds])];
 
-    // console.log(`[Main] Managed accounts for polling: [${managedAccountIds.join(', ')}]`);
-
-    if (managedAccountIds.length > 0 && !assetPollingInterval) {
-      // console.log(`[Main] Initializing Asset Polling Timer (6s interval)...`);
-      assetPollingInterval = setInterval(() => {
-        if (!bridge) return;
-        // console.log(`[Main] [Polling-Tick] Triggering query for ${managedAccountIds.length} accounts`);
-        managedAccountIds.forEach((id, index) => {
-          // Stagger requests slightly to avoid pipe saturation
-          setTimeout(() => {
-            if (!bridge) return;
-            // console.log(`[Main] [Polling-Task] Sending query_assets for: ${id}`);
-            (bridge as any).sendNotify(ActionType.QUERY_ASSETS, { account_id: id });
-          }, index * 200);
-        });
-      }, 6000);
-
-      // Initial trigger
-      managedAccountIds.forEach((id, index) => {
-        setTimeout(() => (bridge as any).sendNotify(ActionType.QUERY_ASSETS, { account_id: id }), index * 200);
-      });
-    }
+    startAssetPolling();
   });
 
   bridge.on('assets_snapshot', (dataArray: any) => {
@@ -324,8 +361,9 @@ function createWindow() {
   bridge.start();
 }
 
-app.whenReady().then(() => {
-  createWindow();
+  app.whenReady().then(() => {
+    startPythonBackend();
+    createWindow();
 
   // IPC Handlers: Map to Python RequestHandlerThread Actions
 
@@ -333,6 +371,20 @@ app.whenReady().then(() => {
   ipcMain.handle('trade:account', async (_, accountId: string) => {
     if (!bridge) return { success: false, error: "主进程未就绪" };
     return bridge.sendRequest(ActionType.QUERY_ASSETS, { account_id: accountId });
+  });
+
+  // 0. Get cached accounts
+  ipcMain.handle('trade:get-cached-accounts', () => {
+    // 如果有缓存账户，同时设置 managedAccountIds 并启动轮询
+    if (cachedAccounts.length > 0) {
+      const ids = cachedAccounts.map(acc => acc.account_id).filter(Boolean);
+      if (ids.length > 0) {
+        managedAccountIds = [...new Set([...managedAccountIds, ...ids])];
+        console.log(`[Main] 从缓存恢复账户信息，启动轮询. Count: ${ids.length}`);
+        startAssetPolling();
+      }
+    }
+    return cachedAccounts;
   });
 
   // 2. Positions
@@ -467,6 +519,10 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  if (pythonProcess) {
+    pythonProcess.kill();
+    pythonProcess = null;
+  }
   if (assetPollingInterval) clearInterval(assetPollingInterval);
   bridge?.stop();
   if (process.platform !== 'darwin') {

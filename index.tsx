@@ -33,8 +33,11 @@ if (!window.electronAPI) {
       console.log("[Mock] Order Received:", order);
       setTimeout(() => {
         const orderId = "ORD" + Math.floor(Math.random() * 10000);
+        const orderSysId = "SYS" + Math.floor(Math.random() * 100000000);
         const orderUpdate: OrderStatus = {
           orderId,
+          orderSysId,
+          accountId: order.account_id,
           orderTime: new Date().toLocaleTimeString(),
           symbol: order.symbol,
           stockName: getName(order.symbol),
@@ -83,20 +86,11 @@ if (!window.electronAPI) {
       };
     },
 
-    subscribe: async (symbol) => {
-      console.log("[Mock] Subscribe:", symbol);
-      activeSymbol = symbol;
-      return { success: true };
-    },
-
     onTick: (callback) => {
-      // Mock static data for consistent display
       const preClose = 5.13;
-
-      setInterval(() => {
+      const intervalId = setInterval(() => {
         const noise = (Math.random() - 0.5) * 0.1;
-        const lastPrice = 4.88 + noise; // Match screenshot roughly
-
+        const lastPrice = 4.88 + noise;
         const asks: [number, number][] = [];
         for (let i = 1; i <= 5; i++) {
           asks.push([lastPrice + i * 0.01, Math.floor(Math.random() * 2000) + 100]);
@@ -105,7 +99,6 @@ if (!window.electronAPI) {
         for (let i = 1; i <= 5; i++) {
           bids.push([lastPrice - i * 0.01, Math.floor(Math.random() * 2000) + 100]);
         }
-
         callback({
           symbol: activeSymbol,
           stockName: getName(activeSymbol),
@@ -114,37 +107,109 @@ if (!window.electronAPI) {
           time: new Date().toLocaleTimeString(),
           asks,
           bids,
-          // Extended Mock Data matching screenshot style
           preClose: preClose,
           open: 5.06,
           high: 5.07,
           low: 4.88,
-          // Limit Up/Down fixed values
           limitUp: parseFloat((preClose * 1.1).toFixed(2)),
           limitDown: parseFloat((preClose * 0.9).toFixed(2)),
-          amount: 1853000000, // 18.53亿
-          totalValue: 58222000000, // 582.22亿
-          currencyValue: 47416000000, // 474.16亿
+          amount: 1853000000,
+          totalValue: 58222000000,
+          currencyValue: 47416000000,
           pe: "亏损",
           volRatio: 1.18,
           turnoverRate: 3.85
         });
       }, 1000);
+      return () => clearInterval(intervalId);
     },
 
     onOrderUpdate: (callback) => {
       if (!listeners['order']) listeners['order'] = [];
       listeners['order'].push(callback);
+      return () => {
+        listeners['order'] = listeners['order'].filter(cb => cb !== callback);
+      };
     },
 
     onSystemLog: (callback) => {
       setTimeout(() => callback("外部交易核心已连接 (Browser Mode)"), 500);
+      return () => {};
+    },
+
+    onAccounts: (callback) => {
+      setTimeout(() => callback([]), 500);
+      return () => {};
+    },
+
+    onAssetsSnapshot: (callback) => {
+      return () => {};
+    },
+
+    onPositionsSnapshot: (callback) => {
+      return () => {};
+    },
+
+    onOrdersSnapshot: (callback) => {
+      return () => {};
+    },
+
+    onTradesSnapshot: (callback) => {
+      return () => {};
+    },
+
+    getStockDetail: async (_symbol) => {
+      return null;
+    },
+
+    getCachedAccounts: async () => {
+      return [];
+    },
+
+    queryPositionsSnapshot: async (_accountIds) => {},
+    queryOrdersSnapshot: async (_accountIds) => {},
+    queryTradesSnapshot: async (_accountIds) => {},
+
+    onOrderAsyncResponse: (callback) => {
+      return () => {};
+    },
+
+    onCancelOrderAsyncResponse: (callback) => {
+      return () => {};
+    },
+
+    onTradeUpdate: (callback) => {
+      return () => {};
+    },
+
+    onOrderUpdateError: (callback) => {
+      return () => {};
+    },
+
+    onCancelOrderUpdateError: (callback) => {
+      return () => {};
+    },
+
+    onAllTicks: (callback) => {
+      return () => {};
     },
 
     // Window Controls Mock
     minimizeWindow: async () => console.log("[Mock] Minimize Window"),
     maximizeWindow: async () => console.log("[Mock] Maximize Window"),
     closeWindow: async () => console.log("[Mock] Close Window"),
+
+    setFocusSymbol: (symbol) => {
+      activeSymbol = symbol;
+    },
+
+    getTickSnapshot: async (symbol) => {
+      return null;
+    },
+
+    cancelOrder: async (_accountId, _orderSysId, _marketType) => {
+      return { success: true };
+    },
   };
 
   window.electronAPI = mockAPI;

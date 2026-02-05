@@ -154,6 +154,35 @@ export const App: React.FC = () => {
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
+  // Toast notification state
+  interface ToastItem {
+    id: number;
+    message: string;
+    type: 'info' | 'success' | 'error';
+  }
+  const [toastQueue, setToastQueue] = useState<ToastItem[]>([]);
+  const [currentToast, setCurrentToast] = useState<ToastItem | null>(null);
+
+  const addToast = useCallback((message: string, type: ToastItem['type'] = 'info') => {
+    const toast: ToastItem = { id: Date.now(), message, type };
+    setToastQueue(prev => [...prev, toast]);
+  }, []);
+
+  // Toast queue processor
+  useEffect(() => {
+    if (toastQueue.length === 0) return;
+    if (currentToast) return;
+    setCurrentToast(toastQueue[0]);
+    setToastQueue(prev => prev.slice(1));
+  }, [toastQueue, currentToast]);
+
+  // Auto dismiss timer
+  useEffect(() => {
+    if (!currentToast) return;
+    const timer = setTimeout(() => setCurrentToast(null), 1000);
+    return () => clearTimeout(timer);
+  }, [currentToast]);
+
   const addLog = useCallback((msg: string) => {
     setLogs(prev => [...prev.slice(-199), `[${new Date().toLocaleTimeString()}] ${msg}`]);
   }, []);
@@ -233,7 +262,53 @@ export const App: React.FC = () => {
       addLog(`委托更新: ${order.symbol} ${order.status}`);
     });
 
+    // Order callbacks for Toast notifications
+    const unsubOrderAsyncResponse = window.electronAPI.onOrderAsyncResponse((data) => {
+      const item = data[0];
+      const icon = item?.error_id !== 0 ? '❌' : '✅';
+      const status = item?.error_id !== 0 ? '提交失败' : '提交成功';
+      const detail = item?.error_msg ? `\n${item.error_msg}` : '';
+      addToast(`[QMT交易系统回调]\n${icon} 订单 ${item?.order_id} ${status}${detail}`, item?.error_id !== 0 ? 'error' : 'success');
+    });
+
+    const unsubCancelOrderAsyncResponse = window.electronAPI.onCancelOrderAsyncResponse((data) => {
+      const item = data[0];
+      const icon = item?.cancel_result !== 0 ? '❌' : '✅';
+      const status = item?.cancel_result !== 0 ? '撤单失败' : '撤单请求已发送';
+      const orderId = item?.order_sysid || item?.order_id;
+      addToast(`[QMT交易系统回调]\n${icon} 合同号 ${orderId} ${status}`, item?.cancel_result !== 0 ? 'error' : 'success');
+    });
+
+    const unsubTradeUpdate = window.electronAPI.onTradeUpdate((trade) => {
+      addToast(`成交: ${trade.symbol} ${trade.action} ${trade.volume}股`, 'info');
+    });
+
+    const unsubOrderUpdateError = window.electronAPI.onOrderUpdateError((data) => {
+      const item = data[0];
+      const detail = item?.error_msg ? `\n${item.error_msg}` : '';
+      addToast(`[QMT交易系统回调]\n❌ 订单 ${item?.order_id} 错误(${item?.error_id})${detail}`, 'error');
+    });
+
+    const unsubCancelOrderUpdateError = window.electronAPI.onCancelOrderUpdateError((data) => {
+      addToast(`撤单更新错误: ${data.error_msg || JSON.stringify(data)}`, 'error');
+    });
+
+    // Query cached accounts first, then listen for updates
+    window.electronAPI.getCachedAccounts().then((cached) => {
+      if (cached && cached.length > 0) {
+        console.log('[Renderer] 使用缓存账户信息:', cached.length, '个');
+        setMultiAccounts(cached);
+        setSelectedAccountIds(prev => prev.length === 0 && cached.length > 0 ? [cached[0].account_id] : prev);
+        addLog(`系统已加载 ${cached.length} 个资金账户（缓存）`);
+        const ids = cached.map(a => a.account_id);
+        window.electronAPI.queryPositionsSnapshot(ids);
+        window.electronAPI.queryOrdersSnapshot(ids);
+        window.electronAPI.queryTradesSnapshot(ids);
+      }
+    });
+
     const unsubAccounts = window.electronAPI.onAccounts((accounts) => {
+      console.log('[Renderer] 收到账户推送:', accounts.length, '个');
       setMultiAccounts(accounts);
       // Auto-select first account if none selected
       setSelectedAccountIds(prev => prev.length === 0 && accounts.length > 0 ? [accounts[0].account_id] : prev);
@@ -376,6 +451,11 @@ export const App: React.FC = () => {
       unsubLog();
       unsubAllTicks();
       unsubOrder();
+      unsubOrderAsyncResponse();
+      unsubCancelOrderAsyncResponse();
+      unsubTradeUpdate();
+      unsubOrderUpdateError();
+      unsubCancelOrderUpdateError();
       unsubAccounts();
       unsubAssetsSnapshot();
       unsubPositionsSnapshot();
@@ -1155,36 +1235,43 @@ export const App: React.FC = () => {
   const renderPositionsTableContent = () => {
     // 根据 sortConfig 排序
     const sortedPositions = [...positions].sort((a, b) => {
+      // 默认按 accountId + symbol 排序
       if (!sortConfig) {
-        // 默认按 accountId + symbol 排序
         if (a.accountId !== b.accountId) return a.accountId.localeCompare(b.accountId);
         return a.symbol.localeCompare(b.symbol);
       }
 
+      let result = 0;
+
       // 可用排序
       if (sortConfig.key === 'canUseVolume') {
-        return sortConfig.direction === 'asc'
+        result = sortConfig.direction === 'asc'
           ? a.canUseVolume - b.canUseVolume
           : b.canUseVolume - a.canUseVolume;
       }
-
       // 市值排序
-      if (sortConfig.key === 'marketValue') {
-        return sortConfig.direction === 'asc'
+      else if (sortConfig.key === 'marketValue') {
+        result = sortConfig.direction === 'asc'
           ? a.marketValue - b.marketValue
           : b.marketValue - a.marketValue;
       }
-
       // 盈亏排序
-      if (sortConfig.key === 'profit') {
+      else if (sortConfig.key === 'profit') {
         const curPriceA = priceMap[a.symbol]?.lastPrice ?? a.openPrice ?? 0;
         const curPriceB = priceMap[b.symbol]?.lastPrice ?? b.openPrice ?? 0;
         const profitA = (curPriceA - (a.openPrice ?? 0)) * a.volume;
         const profitB = (curPriceB - (b.openPrice ?? 0)) * b.volume;
-        return sortConfig.direction === 'asc' ? profitA - profitB : profitB - profitA;
+        result = sortConfig.direction === 'asc' ? profitA - profitB : profitB - profitA;
       }
 
-      return 0;
+      // 如果主键相等，使用 accountId + symbol 作为 tiebreaker 确保稳定排序
+      if (result === 0) {
+        const keyA = a.accountId + a.symbol;
+        const keyB = b.accountId + b.symbol;
+        return keyA.localeCompare(keyB);
+      }
+
+      return result;
     });
 
     return (
@@ -1942,6 +2029,14 @@ export const App: React.FC = () => {
              background: rgba(156, 163, 175, 0.5); 
              border-radius: 3px;
           }
+          /* Toast fade-in animation */
+          @keyframes fade-in {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+          }
+          .animate-fade-in {
+            animation: fade-in 0.3s ease-out;
+          }
         `}</style>
 
       {/* Navigation Sidebar */}
@@ -2071,6 +2166,28 @@ export const App: React.FC = () => {
         {activeTab === 'trade' && renderTradePanel()}
         {activeTab === 'orders' && renderOrders()}
         {activeTab === 'trades' && renderTrades()}
+
+        {/* Toast Notification - Bottom Right */}
+        {currentToast && (
+          <div className="fixed bottom-6 right-6 z-[200] animate-fade-in">
+            <div className={`px-4 py-3 rounded-lg shadow-lg text-white max-w-[800px] ${
+              currentToast.type === 'error' ? 'bg-red-600' :
+              currentToast.type === 'success' ? 'bg-green-600' : 'bg-blue-600'
+            }`}>
+              <div className="flex items-start justify-between gap-4">
+                <span className="text-sm font-medium whitespace-pre-wrap break-all">{currentToast.message}</span>
+                <button
+                  onClick={() => setCurrentToast(null)}
+                  className="text-white/80 hover:text-white flex-shrink-0"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

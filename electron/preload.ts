@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setFocusSymbol: (symbol: string) => ipcRenderer.send('trade:set-focus', symbol),
   getTickSnapshot: (symbol: string) => ipcRenderer.invoke('trade:get-tick', symbol),
   getStockDetail: (symbol: string) => ipcRenderer.invoke('trade:get-stock-detail', symbol),
+  getCachedAccounts: () => ipcRenderer.invoke('trade:get-cached-accounts'),
   queryPositionsSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-positions-snapshot', accountIds),
   queryOrdersSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-orders-snapshot', accountIds),
   queryTradesSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-trades-snapshot', accountIds),
@@ -19,11 +20,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const subscription = (_: any, data: any) => callback(data);
     ipcRenderer.on('push:tick', subscription);
     return () => ipcRenderer.removeListener('push:tick', subscription);
-  },
-  onOrderUpdate: (callback: any) => {
-    const subscription = (_: any, data: any) => callback(data);
-    ipcRenderer.on('push:order', subscription);
-    return () => ipcRenderer.removeListener('push:order', subscription);
   },
   onSystemLog: (callback: (msg: any) => void) => {
     const subscription = (_: any, msg: any) => callback(msg);
@@ -59,6 +55,38 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const subscription = (_: any, data: any) => callback(data);
     ipcRenderer.on('push:all-ticks', subscription);
     return () => ipcRenderer.removeListener('push:all-ticks', subscription);
+  },
+
+  // Order callbacks for Toast notifications
+  onOrderAsyncResponse: (callback: (data: any[]) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:order-async-response', subscription);
+    return () => ipcRenderer.removeListener('push:order-async-response', subscription);
+  },
+  onCancelOrderAsyncResponse: (callback: (data: any[]) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:cancel-order-async-response', subscription);
+    return () => ipcRenderer.removeListener('push:cancel-order-async-response', subscription);
+  },
+  onOrderUpdate: (callback: any) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:order', subscription);
+    return () => ipcRenderer.removeListener('push:order', subscription);
+  },
+  onTradeUpdate: (callback: (data: any) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:trade-update', subscription);
+    return () => ipcRenderer.removeListener('push:trade-update', subscription);
+  },
+  onOrderUpdateError: (callback: (data: any) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:order-update-error', subscription);
+    return () => ipcRenderer.removeListener('push:order-update-error', subscription);
+  },
+  onCancelOrderUpdateError: (callback: (data: any) => void) => {
+    const subscription = (_: any, data: any) => callback(data);
+    ipcRenderer.on('push:cancel-order-update-error', subscription);
+    return () => ipcRenderer.removeListener('push:cancel-order-update-error', subscription);
   },
 
   // Window Controls

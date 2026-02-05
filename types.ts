@@ -126,7 +126,6 @@ export interface IElectronAPI {
 
   onTick: (callback: (data: TickData) => void) => () => void;
   onAllTicks: (callback: (data: Record<string, TickData>) => void) => () => void;
-  onOrderUpdate: (callback: (data: OrderStatus) => void) => () => void;
   onSystemLog: (callback: (msg: string) => void) => () => void;
   onAccounts: (callback: (accounts: MultiAccountInfo[]) => void) => () => void;
   onAssetsSnapshot: (callback: (assets: any[]) => void) => () => void;
@@ -134,9 +133,18 @@ export interface IElectronAPI {
   onOrdersSnapshot: (callback: (orders: OrderStatus[]) => void) => () => void;
   onTradesSnapshot: (callback: (trades: Trade[]) => void) => () => void;
   getStockDetail: (symbol: string) => Promise<StockDetail | null>;
+  getCachedAccounts: () => Promise<any[]>;
   queryPositionsSnapshot: (accountIds?: string[]) => Promise<void>;
   queryOrdersSnapshot: (accountIds?: string[]) => Promise<void>;
   queryTradesSnapshot: (accountIds?: string[]) => Promise<void>;
+
+  // Order callbacks for Toast notifications
+  onOrderAsyncResponse: (callback: (data: any[]) => void) => () => void;
+  onCancelOrderAsyncResponse: (callback: (data: any[]) => void) => () => void;
+  onOrderUpdate: (callback: (data: OrderStatus) => void) => () => void;
+  onTradeUpdate: (callback: (data: Trade) => void) => () => void;
+  onOrderUpdateError: (callback: (data: any) => void) => () => void;
+  onCancelOrderUpdateError: (callback: (data: any) => void) => () => void;
 
   // Window Controls
   minimizeWindow: () => Promise<void>;
