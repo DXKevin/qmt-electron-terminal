@@ -152,6 +152,11 @@ export interface IElectronAPI {
   closeWindow: () => Promise<void>;
 }
 
+export interface TradeSettings {
+  buyPresets: number[];
+  sellPresets: number[];
+}
+
 declare global {
   interface Window {
     electronAPI: IElectronAPI;

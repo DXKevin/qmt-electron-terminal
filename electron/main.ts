@@ -362,7 +362,10 @@ function createWindow() {
 }
 
   app.whenReady().then(() => {
-    startPythonBackend();
+    // 只在打包环境启动后端，开发环境由用户手动启动
+    if (app.isPackaged) {
+      startPythonBackend();
+    }
     createWindow();
 
   // IPC Handlers: Map to Python RequestHandlerThread Actions

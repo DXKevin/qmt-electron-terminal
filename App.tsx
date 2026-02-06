@@ -43,7 +43,7 @@ const AnimatedNumber: React.FC<{ value: number; format?: (v: number) => string; 
   return <span className={className}>{format(displayValue)}</span>;
 };
 
-type TabType = 'assets' | 'trade' | 'orders' | 'trades';
+type TabType = 'assets' | 'trade' | 'orders' | 'trades' | 'settings';
 type SortDirection = 'asc' | 'desc';
 // Removed LIMIT_UP and LIMIT_DOWN from PriceMode as they are now static fills
 type PriceMode = 'LIMIT' | 'BEST_5' | 'OPPOSITE' | 'CAGE';
@@ -98,6 +98,10 @@ type VolumeStrategy =
   | { type: 'RATIO', value: number, label: string }
   | { type: 'AMOUNT', value: number, label: string };
 
+const DEFAULT_BUY_PRESETS = [10, 15, 20, 25, 30, 60, 80, 100];
+const DEFAULT_SELL_PRESETS = [10, 15, 20, 25, 30, 60, 80, 100];
+const SETTINGS_STORAGE_KEY = 'qmt-trade-settings';
+
 export const App: React.FC = () => {
   // Data State
   const [account, setAccount] = useState<AccountInfo | null>(null);
@@ -113,6 +117,7 @@ export const App: React.FC = () => {
   const [tradeSide, setTradeSide] = useState<'BUY' | 'SELL'>('BUY'); // Track active side
   const [sortConfig, setSortConfig] = useState<{ key: string; direction: SortDirection } | null>(null);
   const [isSidebarOpen, setSidebarOpen] = useState(true); // New Sidebar State
+  const [showTradeSummary, setShowTradeSummary] = useState(false);
 
   // Multi-Account State
   const [multiAccounts, setMultiAccounts] = useState<MultiAccountInfo[]>([]);
@@ -136,7 +141,15 @@ export const App: React.FC = () => {
   const [amountInWan, setAmountInWan] = useState<string>('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [priceType, setPriceType] = useState<PriceMode>('CAGE'); // Track price mode
+  const [priceType, setPriceType] = useState<PriceMode>('CAGE');
+
+  // Settings State
+  const [tempBuyPresets, setTempBuyPresets] = useState<number[]>(DEFAULT_BUY_PRESETS);
+  const [tempSellPresets, setTempSellPresets] = useState<number[]>(DEFAULT_SELL_PRESETS);
+  const [buyPresets, setBuyPresets] = useState<number[]>(DEFAULT_BUY_PRESETS);
+  const [sellPresets, setSellPresets] = useState<number[]>(DEFAULT_SELL_PRESETS);
+  const [tempAccountRemarks, setTempAccountRemarks] = useState<Record<string, string>>({});
+  const [accountRemarks, setAccountRemarks] = useState<Record<string, string>>({});
 
   // Window Controls State
   const [showExitConfirm, setShowExitConfirm] = useState(false);
@@ -232,6 +245,26 @@ export const App: React.FC = () => {
       addLog(`暂无账户信息，跳过请求`);
     }
   };
+
+  // Load settings from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.buyPresets && parsed.sellPresets) {
+          setBuyPresets(parsed.buyPresets);
+          setSellPresets(parsed.sellPresets);
+        }
+        if (parsed.accountRemarks) {
+          setAccountRemarks(parsed.accountRemarks);
+          setTempAccountRemarks(parsed.accountRemarks);
+        }
+      } catch (e) {
+        console.error('Failed to parse settings:', e);
+      }
+    }
+  }, []);
 
   // Initialize listeners
   useEffect(() => {
@@ -634,15 +667,8 @@ export const App: React.FC = () => {
 
   // Set Ratio Mode
   const handleQuickVolume = (ratio: number) => {
-    let label = "";
-    if (ratio === 1) label = "全仓 (100%)";
-    else if (ratio === 0.5) label = "半仓 (50%)";
-    else if (ratio === 0.333) label = "1/3仓 (33%)";
-    else if (ratio === 0.25) label = "1/4仓 (25%)";
-    else if (ratio === 0.2) label = "1/5仓 (20%)";
-    else if (ratio === 0.1) label = "1/10仓 (10%)";
-    else label = `按比例 (${(ratio * 100).toFixed(0)}%)`;
-
+    const percent = Math.round(ratio * 100);
+    const label = percent === 100 ? '全仓' : `${percent}%`;
     setVolStrategy({ type: 'RATIO', value: ratio, label });
     setAmountInWan('');
   };
@@ -752,7 +778,7 @@ export const App: React.FC = () => {
         const ratio = volStrategy.value;
 
         if (action === 'BUY') {
-          const accData = MOCK_MULTI_ACCOUNTS.find(a => a.id === accId);
+          const accData = assetsMap[accId];
           if (accData && p > 0) {
             const targetCash = accData.cash * ratio;
             finalVolume = Math.floor((targetCash / p) / 100) * 100;
@@ -772,16 +798,16 @@ export const App: React.FC = () => {
       };
     });
 
-    // 检查是否有账户数量为0
-    const zeroVolumeAccounts = accountOrders.filter(a => a.volume <= 0);
-    if (zeroVolumeAccounts.length > 0) {
-      setErrorMessage(`以下账户数量为0：\n${zeroVolumeAccounts.map(a => `账户[${a.id}]`).join('\n')}`);
+    // 过滤出有效账户（数量 > 0）
+    const validOrders = accountOrders.filter(a => a.volume > 0);
+    if (validOrders.length === 0) {
+      setErrorMessage("所选账户均无该股票持仓");
       return;
     }
 
-    // 显示确认面板
+    // 显示确认面板（只显示有持仓的账户）
     setConfirmOrderInfo({
-      accounts: accountOrders,
+      accounts: validOrders,
       symbol,
       action,
       price: p
@@ -1125,7 +1151,9 @@ export const App: React.FC = () => {
 
               <div className="flex-1 min-w-0 flex flex-col">
                 <div className="flex justify-between items-center">
-                  <span className={`text-xs font-bold truncate ${isSelected ? 'text-blue-900' : 'text-gray-900'}`}>账户 {acc.account_id.slice(-4)}</span>
+                  <span className={`text-xs font-bold truncate ${isSelected ? 'text-blue-900' : 'text-gray-900'}`}>
+                    {accountRemarks[acc.account_id] || `账户 ${acc.account_id.slice(-4)}`}
+                  </span>
                   <span className={`text-[10px] scale-90 origin-right font-bold ${isLogin ? 'text-green-500' : 'text-gray-400'}`}>
                     {isLogin ? '在线' : '离线'}
                   </span>
@@ -1186,11 +1214,12 @@ export const App: React.FC = () => {
             <span className="text-xs font-mono text-gray-400">共 {multiAccounts.length} 个账户</span>
           </div>
           <table className="w-full text-sm text-left">
-            <thead className="bg-white text-gray-500 font-medium border-b border-gray-200">
+              <thead className="bg-white text-gray-500 font-medium border-b border-gray-200">
               <tr>
                 <th className="px-6 py-3">账号 ID</th>
                 <th className="px-6 py-3">账户类型</th>
                 <th className="px-6 py-3 text-right">总资产</th>
+                <th className="px-6 py-3 text-right">持仓市值</th>
                 <th className="px-6 py-3 text-right">可用资金</th>
                 <th className="px-6 py-3 text-center">状态</th>
               </tr>
@@ -1207,6 +1236,9 @@ export const App: React.FC = () => {
                       <td className="px-6 py-4 text-right font-mono">
                         {(info?.assets ?? 0).toLocaleString()}
                       </td>
+                      <td className="px-6 py-4 text-right font-mono text-blue-600">
+                        {(info?.marketValue ?? 0).toLocaleString()}
+                      </td>
                       <td className="px-6 py-4 text-right font-mono text-green-600">
                         {(info?.cash ?? 0).toLocaleString()}
                       </td>
@@ -1219,8 +1251,8 @@ export const App: React.FC = () => {
                   )
                 })
               ) : (
-                <tr>
-                  <td colSpan={5} className="px-6 py-12 text-center text-gray-400 text-sm italic">
+                  <tr>
+                    <td colSpan={6} className="px-6 py-12 text-center text-gray-400 text-sm italic">
                     等待账户信息下发...
                   </td>
                 </tr>
@@ -1263,6 +1295,30 @@ export const App: React.FC = () => {
         const profitB = (curPriceB - (b.openPrice ?? 0)) * b.volume;
         result = sortConfig.direction === 'asc' ? profitA - profitB : profitB - profitA;
       }
+      // 涨幅排序
+      else if (sortConfig.key === 'changePercent') {
+        const preCloseA = priceMap[a.symbol]?.preClose ?? 0;
+        const preCloseB = priceMap[b.symbol]?.preClose ?? 0;
+        const curPriceA = priceMap[a.symbol]?.lastPrice ?? a.openPrice ?? 0;
+        const curPriceB = priceMap[b.symbol]?.lastPrice ?? b.openPrice ?? 0;
+        const changeA = preCloseA > 0 ? ((curPriceA - preCloseA) / preCloseA) * 100 : null;
+        const changeB = preCloseB > 0 ? ((curPriceB - preCloseB) / preCloseB) * 100 : null;
+        if (changeA === null && changeB === null) result = 0;
+        else if (changeA === null) result = 1;
+        else if (changeB === null) result = -1;
+        else result = sortConfig.direction === 'asc' ? changeA - changeB : changeB - changeA;
+      }
+      // 占比排序
+      else if (sortConfig.key === 'ratio') {
+        const assetsA = assetsMap[a.accountId]?.assets ?? 0;
+        const assetsB = assetsMap[b.accountId]?.assets ?? 0;
+        const ratioA = assetsA > 0 ? (a.marketValue / assetsA) * 100 : null;
+        const ratioB = assetsB > 0 ? (b.marketValue / assetsB) * 100 : null;
+        if (ratioA === null && ratioB === null) result = 0;
+        else if (ratioA === null) result = 1;
+        else if (ratioB === null) result = -1;
+        else result = sortConfig.direction === 'asc' ? ratioA - ratioB : ratioB - ratioA;
+      }
 
       // 如果主键相等，使用 accountId + symbol 作为 tiebreaker 确保稳定排序
       if (result === 0) {
@@ -1274,94 +1330,150 @@ export const App: React.FC = () => {
       return result;
     });
 
-    return (
-      <div className="flex-1 overflow-y-auto">
-        <table className="w-full text-left border-collapse">
-          <thead className="bg-gray-50 sticky top-0 z-10">
-            <tr>
-              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">账户</th>
-              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider">代码/名称</th>
-              <th
-                className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
-                onClick={() => handlePositionSort('canUseVolume')}
-              >
-                持仓/可用 {renderPositionSortIndicator('canUseVolume')}
-              </th>
-              <th className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">现价/成本</th>
-              <th
-                className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
-                onClick={() => handlePositionSort('marketValue')}
-              >
-                市值 {renderPositionSortIndicator('marketValue')}
-              </th>
-              <th
-                className="px-6 py-3 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
-                onClick={() => handlePositionSort('profit')}
-              >
-                盈亏 {renderPositionSortIndicator('profit')}
-              </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-200 bg-white">
-            {sortedPositions.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="px-6 py-12 text-center text-gray-400 text-sm">暂无持仓数据</td>
-              </tr>
-            ) : (
-              sortedPositions.map((pos) => {
-                // 从 priceMap 获取实时价格，如果没有则使用成本价
-                const curPrice = priceMap[pos.symbol]?.lastPrice ?? pos.openPrice ?? 0;
-                const profit = (curPrice - (pos.openPrice ?? 0)) * pos.volume;
-                const profitPercent = (pos.openPrice ?? 0) > 0 ? (profit / ((pos.openPrice ?? 0) * pos.volume)) * 100 : 0;
+    const totalMarketValue = sortedPositions.reduce((sum, pos) => sum + pos.marketValue, 0);
+    const totalProfit = sortedPositions.reduce((sum, pos) => {
+      const curPrice = priceMap[pos.symbol]?.lastPrice ?? pos.openPrice ?? 0;
+      return sum + (curPrice - (pos.openPrice ?? 0)) * pos.volume;
+    }, 0);
 
-                return (
-                  <tr key={`${pos.accountId}-${pos.symbol}`} className="hover:bg-blue-50 transition-colors cursor-pointer group" onClick={async () => {
-                    let val = pos.symbol;
-                    if (!val.includes('.')) {
-                      if (val.startsWith('6') || val.startsWith('9')) val += '.SH';
-                      else if (val.startsWith('0') || val.startsWith('3')) val += '.SZ';
-                      else if (val.startsWith('8') || val.startsWith('4')) val += '.BJ';
-                    }
-                    setSymbol(val);
-                    setTradeSide('SELL');
-                    window.electronAPI.setFocusSymbol(val);
-                    const detail = await window.electronAPI.getStockDetail(val);
-                    if (detail) {
-                      setStockName(detail.name);
-                    }
-                  }}>
-                    <td className="px-6 py-3">
-                      <div className="text-xs font-bold text-gray-500">{pos.accountId}</div>
-                    </td>
-                    <td className="px-6 py-3">
-                      <div className="text-sm font-bold text-gray-900">{pos.stockName}</div>
-                      <div className="text-xs font-mono text-gray-400">{pos.symbol}</div>
-                    </td>
-                    <td className="px-6 py-3 text-right">
-                      <div className="text-sm font-bold text-gray-900">{pos.volume}</div>
-                      <div className="text-xs font-bold text-blue-600">可卖 {pos.canUseVolume}</div>
-                    </td>
-                    <td className="px-6 py-3 text-right">
-                      <div className={`text-sm font-mono font-bold ${curPrice > (pos.openPrice ?? 0) ? 'text-red-600' : curPrice < (pos.openPrice ?? 0) ? 'text-green-600' : 'text-gray-900'}`}>{curPrice.toFixed(2)}</div>
-                      <div className="text-xs font-mono text-gray-400">{(pos.openPrice ?? 0).toFixed(2)}</div>
-                    </td>
-                    <td className="px-6 py-3 text-right">
-                      <div className="text-sm font-mono font-bold text-gray-900">{pos.marketValue.toLocaleString()}</div>
-                    </td>
-                    <td className="px-6 py-3 text-right">
-                      <div className={`text-sm font-mono font-bold ${profit >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                        {profit >= 0 ? '+' : ''}{profit.toLocaleString()}
-                      </div>
-                      <div className={`text-xs font-mono font-bold ${profit >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                        {profit >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
+    return (
+      <div className="flex flex-col h-full">
+        <div className="flex-1 overflow-y-auto">
+          <table className="w-full text-left border-collapse">
+            <thead className="bg-gray-50 sticky top-0 z-10">
+              <tr>
+                <th className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider">账户</th>
+                <th className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider">代码/名称</th>
+                <th
+                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  onClick={() => handlePositionSort('canUseVolume')}
+                >
+                  持仓/可用 {renderPositionSortIndicator('canUseVolume')}
+                </th>
+                <th className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right">现价/成本</th>
+                <th
+                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  onClick={() => handlePositionSort('changePercent')}
+                >
+                  涨幅 {renderPositionSortIndicator('changePercent')}
+                </th>
+                <th
+                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  onClick={() => handlePositionSort('ratio')}
+                >
+                  资产占比 {renderPositionSortIndicator('ratio')}
+                </th>
+                <th
+                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  onClick={() => handlePositionSort('marketValue')}
+                >
+                  市值 {renderPositionSortIndicator('marketValue')}
+                </th>
+                <th
+                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  onClick={() => handlePositionSort('profit')}
+                >
+                  盈亏 {renderPositionSortIndicator('profit')}
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-200 bg-white">
+              {sortedPositions.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="px-6 py-12 text-center text-gray-400 text-sm">暂无持仓数据</td>
+                </tr>
+              ) : (
+                sortedPositions.map((pos) => {
+                  const curPrice = priceMap[pos.symbol]?.lastPrice ?? pos.openPrice ?? 0;
+                  const preClose = priceMap[pos.symbol]?.preClose ?? 0;
+                  const changePercent = preClose > 0 ? ((curPrice - preClose) / preClose) * 100 : null;
+                  const changeColor = changePercent === null ? 'text-gray-400' : 
+                    changePercent > 0 ? 'text-red-600' : changePercent < 0 ? 'text-green-600' : 'text-gray-900';
+                  const accountAssets = assetsMap[pos.accountId]?.assets ?? 0;
+                  const ratio = accountAssets > 0 ? (pos.marketValue / accountAssets) * 100 : null;
+                  const profit = (curPrice - (pos.openPrice ?? 0)) * pos.volume;
+                  const profitPercent = (pos.openPrice ?? 0) > 0 ? (profit / ((pos.openPrice ?? 0) * pos.volume)) * 100 : 0;
+                  const priceColor = curPrice > (pos.openPrice ?? 0) ? 'text-red-600' : curPrice < (pos.openPrice ?? 0) ? 'text-green-600' : 'text-gray-900';
+                  const profitColor = profit >= 0 ? 'text-red-600' : 'text-green-600';
+
+                  return (
+                    <tr key={`${pos.accountId}-${pos.symbol}`} className="hover:bg-blue-50 transition-colors cursor-pointer group" onClick={async () => {
+                      let val = pos.symbol;
+                      if (!val.includes('.')) {
+                        if (val.startsWith('6') || val.startsWith('9')) val += '.SH';
+                        else if (val.startsWith('0') || val.startsWith('3')) val += '.SZ';
+                        else if (val.startsWith('8') || val.startsWith('4')) val += '.BJ';
+                      }
+                      setSymbol(val);
+                      setTradeSide('SELL');
+                      window.electronAPI.setFocusSymbol(val);
+                      const detail = await window.electronAPI.getStockDetail(val);
+                      if (detail) {
+                        setStockName(detail.name);
+                      }
+                    }}>
+                      <td className="px-6 py-3">
+                        <div className="text-xs font-bold text-gray-500">{pos.accountId}</div>
+                      </td>
+                      <td className="px-6 py-3">
+                        <div className="text-sm font-bold text-gray-900">{pos.stockName}</div>
+                        <div className="text-xs font-mono text-gray-400">{pos.symbol}</div>
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className="text-sm font-bold text-gray-900">{pos.volume}</div>
+                        <div className="text-xs font-bold text-blue-600">可卖 {pos.canUseVolume}</div>
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className={`text-sm font-mono font-bold ${priceColor}`}>{curPrice.toFixed(2)}</div>
+                        <div className="text-xs font-mono text-gray-400">{(pos.openPrice ?? 0).toFixed(2)}</div>
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className={`text-sm font-mono ${changeColor}`}>
+                          {changePercent === null ? '--' : `${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%`}
+                        </div>
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className="text-sm font-mono text-gray-500">
+                          {ratio === null ? '--' : `${ratio.toFixed(2)}%`}
+                        </div>
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className="text-sm font-mono font-bold text-gray-900">{pos.marketValue.toLocaleString()}</div>
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className={`text-sm font-mono font-bold ${profitColor}`}>
+                          {profit >= 0 ? '+' : ''}{profit.toLocaleString()}
+                        </div>
+                        <div className={`text-xs font-mono font-bold ${profitColor}`}>
+                          {profit >= 0 ? '+' : ''}{profitPercent.toFixed(2)}%
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
+              )
+            }
+            </tbody>
+            <tfoot className="bg-white font-bold border-t border-gray-200 sticky bottom-0">
+              <tr>
+                <td className="px-6 py-3"></td>
+                <td className="px-6 py-3"></td>
+                <td className="px-6 py-3 text-right"></td>
+                <td className="px-6 py-3 text-right"></td>
+                <td className="px-6 py-3 text-right"></td>
+                <td className="px-6 py-3 text-right"></td>
+                <td className="px-6 py-3 text-right font-mono text-gray-900">
+                  {totalMarketValue.toLocaleString()}
+                </td>
+                <td className="px-6 py-3 text-right font-mono">
+                  <span className={totalProfit >= 0 ? "text-red-600" : "text-green-600"}>
+                    {totalProfit >= 0 ? "+" : ""}{totalProfit.toLocaleString()}
+                  </span>
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
       </div>
     );
   };
@@ -1432,7 +1544,7 @@ export const App: React.FC = () => {
         <span className="text-xs text-gray-400 font-medium">共 {orders.length} 笔委托</span>
       </div>
 
-        <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card}`}>
+        <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
         {/* Header */}
         <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
           <div className="w-12 px-6 py-2"></div>
@@ -1456,7 +1568,7 @@ export const App: React.FC = () => {
         </div>
 
         {/* List */}
-        <div className="flex-1 overflow-y-auto bg-white">
+        <div className="flex-1 overflow-auto bg-white">
           {(() => {
             const displayed = showCancellableOnly
               ? orders.filter(o => ['UNREPORTED', 'WAIT_REPORTING', 'REPORTED', 'SUBMITTED', 'PART_SUCC', 'UNKNOWN'].includes(o.status))
@@ -1515,7 +1627,7 @@ export const App: React.FC = () => {
                         (o.status === 'JUNK' || o.status === 'REJECTED') ? 'bg-red-100 text-red-700' :
                           'bg-blue-50 text-blue-600'
                     }`}>{o.status}</span>, "w-24", "center")}
-              {cell(<div className="text-xs text-gray-400 truncate">{o.msg}</div>, "flex-1")}
+                  {cell(<div className="text-xs text-gray-400 break-all">{o.msg}</div>, "flex-1")}
                 </div>
               );
             });
@@ -1571,35 +1683,162 @@ export const App: React.FC = () => {
     </div>
   );
 
-  const renderTrades = () => renderTableList(
-    [
-      { label: "时间", className: "w-32" },
-      { label: "代码", className: "w-32" },
-      { label: "名称", className: "w-32" },
-      { label: "方向", className: "w-24", align: "center" },
-      { label: "价格", align: "right", className: "w-32" },
-      { label: "数量", align: "right", className: "w-32" },
-      { label: "金额", align: "right", className: "flex-1" },
-    ],
-    sortTradesStable(trades),
-    (t: Trade, i: number) => {
-      const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
-        <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
-          {content}
+  const calculateTradeSummary = (trades: Trade[]) => {
+    const grouped = trades.reduce((acc, t) => {
+      const key = `${t.accountId}-${t.symbol}-${t.action}`;
+      if (!acc[key]) {
+        acc[key] = {
+          accountId: t.accountId,
+          symbol: t.symbol,
+          stockName: t.stockName,
+          action: t.action,
+          totalVolume: 0,
+          totalAmount: 0,
+          tradeCount: 0,
+        };
+      }
+      const item = acc[key];
+      item.totalVolume += t.volume;
+      item.totalAmount += t.amount;
+      item.tradeCount += 1;
+      return acc;
+    }, {} as Record<string, any>);
+
+    return Object.values(grouped).map(item => ({
+      ...item,
+      avgPrice: item.totalVolume > 0 ? item.totalAmount / item.totalVolume : 0,
+    })).sort((a, b) => {
+      if (a.accountId !== b.accountId) return a.accountId.localeCompare(b.accountId);
+      return a.symbol.localeCompare(b.symbol);
+    });
+  };
+
+  const renderTradeSummaryRow = (item: any) => {
+    const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
+      <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+        {content}
+      </div>
+    );
+    return (
+      <React.Fragment>
+        {cell(<div className="font-bold text-gray-400 text-xs">{item.accountId}</div>, "w-32")}
+        {cell(<div className="font-mono font-bold text-gray-800">{item.symbol}</div>, "w-32")}
+        {cell(<div className="font-medium text-gray-700">{item.stockName}</div>, "w-32")}
+        {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${item.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>
+          {item.action === 'BUY' ? '买入' : '卖出'}
+        </div>, "w-24", "center")}
+        {cell(<div className="font-mono font-bold text-gray-800">{item.avgPrice.toFixed(2)}</div>, "w-32", "right")}
+        {cell(<div className="font-mono font-bold text-gray-800">{item.totalVolume}</div>, "w-32", "right")}
+        {cell(<div className="font-mono font-bold text-red-600">{item.totalAmount.toLocaleString()}</div>, "flex-1", "right")}
+        {cell(<div className="font-mono text-gray-500">{item.tradeCount}次</div>, "w-20", "center")}
+      </React.Fragment>
+    );
+  };
+
+  const renderTradeSummaryTable = () => {
+    const summaryData = calculateTradeSummary(trades);
+
+    return (
+      <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
+        <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">账户</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">代码</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">名称</div>
+          <div className="w-24 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">方向</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">均价</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">数量</div>
+          <div className="flex-1 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">金额</div>
+          <div className="w-20 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">次数</div>
         </div>
-      );
-      return (
-        <React.Fragment>
-          {cell(<div className="text-xs font-mono text-gray-400">{t.tradeTime}</div>, "w-32")}
-          {cell(<div className="font-mono font-bold text-gray-800">{t.symbol}</div>, "w-32")}
-          {cell(<div className="font-medium text-gray-700">{t.stockName}</div>, "w-32")}
-          {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${t.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{t.action === 'BUY' ? '买入' : '卖出'}</div>, "w-24", "center")}
-          {cell(<div className="font-mono text-gray-600">{t.price.toFixed(2)}</div>, "w-32", "right")}
-          {cell(<div className="font-mono text-gray-600">{t.volume}</div>, "w-32", "right")}
-          {cell(<div className="font-mono font-bold text-gray-800">{t.amount.toLocaleString()}</div>, "flex-1", "right")}
-        </React.Fragment>
-      )
-    }
+        <div className="flex-1 overflow-y-auto bg-white">
+          {summaryData.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-gray-400 text-sm">
+              暂无成交数据
+            </div>
+          ) : (
+            summaryData.map((item, i) => (
+              <div key={i} className="flex border-b last:border-b-0 border-gray-100 hover:bg-blue-50/50 transition-colors">
+                {renderTradeSummaryRow(item)}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderTradeDetailTable = () => {
+    const sortedTrades = sortTradesStable(trades);
+
+    const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
+      <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+        {content}
+      </div>
+    );
+
+    return (
+      <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
+        <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">时间</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">代码</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">名称</div>
+          <div className="w-24 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">方向</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">价格</div>
+          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">数量</div>
+          <div className="flex-1 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">金额</div>
+        </div>
+        <div className="flex-1 overflow-y-auto bg-white">
+          {sortedTrades.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-gray-400 text-sm">
+              暂无成交数据
+            </div>
+          ) : (
+            sortedTrades.map((t, i) => (
+              <div key={i} className="flex border-b last:border-b-0 border-gray-100 hover:bg-blue-50/50 transition-colors">
+                {cell(<div className="text-xs font-mono text-gray-400">{t.tradeTime}</div>, "w-32")}
+                {cell(<div className="font-mono font-bold text-gray-800">{t.symbol}</div>, "w-32")}
+                {cell(<div className="font-medium text-gray-700">{t.stockName}</div>, "w-32")}
+                {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${t.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{t.action === 'BUY' ? '买入' : '卖出'}</div>, "w-24", "center")}
+                {cell(<div className="font-mono text-gray-600">{t.price.toFixed(2)}</div>, "w-32", "right")}
+                {cell(<div className="font-mono text-gray-600">{t.volume}</div>, "w-32", "right")}
+                {cell(<div className="font-mono font-bold text-gray-800">{t.amount.toLocaleString()}</div>, "flex-1", "right")}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderTradesPage = () => (
+    <div className="h-full w-full flex flex-col p-8 pt-4">
+      <div className="flex-shrink-0 flex items-center gap-2 mb-2">
+        <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">视图：</span>
+        <button
+          onClick={() => {
+            console.log('点击成交明细');
+            setShowTradeSummary(false);
+          }}
+          className={`px-3 py-1 text-xs font-bold rounded transition-colors ${
+            !showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+          }`}
+        >
+          成交明细
+        </button>
+        <button
+          onClick={() => {
+            console.log('点击成交统计');
+            setShowTradeSummary(true);
+          }}
+          className={`px-3 py-1 text-xs font-bold rounded transition-colors ${
+            showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+          }`}
+        >
+          成交统计
+        </button>
+      </div>
+      {showTradeSummary ? renderTradeSummaryTable() : renderTradeDetailTable()}
+    </div>
   );
 
   const renderLogs = () => (
@@ -1623,12 +1862,117 @@ export const App: React.FC = () => {
     </div>
   );
 
+  const renderSettings = () => (
+    <div className="h-full w-full flex flex-col p-8 pt-4">
+      <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card}`}>
+        <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+          <h3 className="font-bold text-gray-700">交易设置</h3>
+        </div>
+        <div className="p-6 flex-1">
+          {/* Buy Presets */}
+          <div className="mb-8">
+            <div className="text-sm font-bold text-gray-700 mb-3">买入预设（%）</div>
+            <div className="grid grid-cols-8 gap-3">
+              {tempBuyPresets.map((value, index) => (
+                <div key={`buy-${index}`} className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={value || ''}
+                    onChange={(e) => {
+                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
+                      const newPresets = [...tempBuyPresets];
+                      newPresets[index] = val;
+                      setTempBuyPresets(newPresets);
+                    }}
+                    className="w-full py-2 px-3 rounded-lg border border-gray-300 text-center font-mono text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    placeholder="-"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Sell Presets */}
+          <div className="mb-8">
+            <div className="text-sm font-bold text-gray-700 mb-3">卖出预设（%）</div>
+            <div className="grid grid-cols-8 gap-3">
+              {tempSellPresets.map((value, index) => (
+                <div key={`sell-${index}`} className="relative">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={value || ''}
+                    onChange={(e) => {
+                      const val = Math.min(100, Math.max(0, parseInt(e.target.value) || 0));
+                      const newPresets = [...tempSellPresets];
+                      newPresets[index] = val;
+                      setTempSellPresets(newPresets);
+                    }}
+                    className="w-full py-2 px-3 rounded-lg border border-gray-300 text-center font-mono text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    placeholder="-"
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Account Remarks */}
+          <div className="mb-8">
+            <div className="text-sm font-bold text-gray-700 mb-3">账户备注</div>
+            <div className="space-y-3">
+              {multiAccounts.map(acc => (
+                <div key={acc.account_id} className="flex items-center gap-3">
+                  <span className="w-24 text-sm font-mono text-gray-600 truncate" title={acc.account_id}>{acc.account_id}</span>
+                  <input
+                    type="text"
+                    value={tempAccountRemarks[acc.account_id] || ''}
+                    onChange={(e) => {
+                      const newRemarks = { ...tempAccountRemarks };
+                      newRemarks[acc.account_id] = e.target.value;
+                      setTempAccountRemarks(newRemarks);
+                    }}
+                    className="flex-1 py-2 px-3 rounded-lg border border-gray-300 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                    placeholder="输入备注..."
+                  />
+                </div>
+              ))}
+              {multiAccounts.length === 0 && (
+                <div className="text-sm text-gray-400 italic">暂无账户数据</div>
+              )}
+            </div>
+          </div>
+
+          {/* Save Button */}
+          <div className="flex justify-end">
+            <button
+              onClick={() => {
+                setBuyPresets(tempBuyPresets);
+                setSellPresets(tempSellPresets);
+                setAccountRemarks(tempAccountRemarks);
+                localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+                  buyPresets: tempBuyPresets,
+                  sellPresets: tempSellPresets,
+                  accountRemarks: tempAccountRemarks
+                }));
+              }}
+              className="px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold shadow-lg shadow-blue-500/30 transition-colors"
+            >
+              保存配置
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   const renderTradePanel = () => (
     <div className="flex flex-col h-full w-full p-6 gap-6 pt-12"> {/* Increased top padding for window controls */}
 
       {/* TOP ROW: Accounts | Trade Form | Order Book | Chart */}
-      {/* Increased height to 420px to provide more vertical room */}
-      <div className="flex w-full gap-5 h-[420px] shrink-0">
+      <div className="flex w-full gap-5 h-[450px] shrink-0">
 
         {/* 0. Multi-Account Selector */}
         {renderAccountSelector()}
@@ -1768,21 +2112,65 @@ export const App: React.FC = () => {
               <div className="grid grid-cols-4 gap-2">
                 {tradeSide === 'BUY' ? (
                   <>
-                    <button onClick={() => handleQuickVolume(0.1)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">1/10</button>
-                    <button onClick={() => handleQuickVolume(0.2)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">1/5</button>
-                    <button onClick={() => handleQuickVolume(0.25)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">1/4</button>
-                    <button onClick={() => handleQuickVolume(0.333)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">1/3</button>
+                    {buyPresets.slice(0, 4).map((preset) => (
+                      preset > 0 ? (
+                        <button
+                          key={`buy-${preset}`}
+                          onClick={() => handleQuickVolume(preset / 100)}
+                          className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors"
+                        >
+                          {preset}%
+                        </button>
+                      ) : null
+                    ))}
                   </>
                 ) : (
                   <>
-                    <button onClick={() => handleQuickVolume(0.25)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">1/4</button>
-                    <button onClick={() => handleQuickVolume(0.333)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">1/3</button>
-                    <button onClick={() => handleQuickVolume(0.5)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">1/2</button>
-                    <button onClick={() => handleQuickVolume(1)} className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors">全仓</button>
+                    {sellPresets.slice(0, 4).map((preset) => (
+                      preset > 0 ? (
+                        <button
+                          key={`sell-${preset}`}
+                          onClick={() => handleQuickVolume(preset / 100)}
+                          className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors"
+                        >
+                          {preset}%
+                        </button>
+                      ) : null
+                    ))}
                   </>
                 )}
               </div>
-              {/* REMOVED AVAILABLE DISPLAY TEXT HERE */}
+              <div className="grid grid-cols-4 gap-2 mt-2">
+                {tradeSide === 'BUY' ? (
+                  <>
+                    {buyPresets.slice(4, 8).map((preset) => (
+                      preset > 0 ? (
+                        <button
+                          key={`buy-${preset}`}
+                          onClick={() => handleQuickVolume(preset / 100)}
+                          className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors"
+                        >
+                          {preset}%
+                        </button>
+                      ) : null
+                    ))}
+                  </>
+                ) : (
+                  <>
+                    {sellPresets.slice(4, 8).map((preset) => (
+                      preset > 0 ? (
+                        <button
+                          key={`sell-${preset}`}
+                          onClick={() => handleQuickVolume(preset / 100)}
+                          className="py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-xs font-bold text-gray-600 transition-colors"
+                        >
+                          {preset}%
+                        </button>
+                      ) : null
+                    ))}
+                  </>
+                )}
+              </div>
             </div>
 
             {/* Amount Input Section */}
@@ -2006,10 +2394,11 @@ export const App: React.FC = () => {
             </div>
           </div>
         )}
+
       </div>
     </div>
   );
-
+ 
   return (
     <div className={`h-screen w-screen overflow-hidden flex flex-row ${colors.appBg}`}>
       {/* -- START Custom CSS for Electron Drag & Selection -- */}
@@ -2085,6 +2474,32 @@ export const App: React.FC = () => {
               </span>
             </div>
           ))}
+
+          {/* Settings Button */}
+          <div
+            onClick={() => {
+              setTempBuyPresets(buyPresets);
+              setTempSellPresets(sellPresets);
+              setActiveTab('settings');
+            }}
+            className={`flex items-center p-3 rounded-xl cursor-pointer transition-all duration-200 group whitespace-nowrap overflow-hidden
+                          ${activeTab === 'settings'
+                ? 'bg-blue-50 text-blue-600 shadow-sm ring-1 ring-blue-100'
+                : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900'
+              }
+                          ${!isSidebarOpen && 'justify-center'}
+                      `}
+            title={!isSidebarOpen ? '设置' : ''}
+          >
+            <svg className={`flex-shrink-0 w-6 h-6 transition-transform group-hover:scale-110 stroke-[1.5]`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+
+            <span className={`ml-3 font-bold text-sm transition-opacity duration-200 ${isSidebarOpen ? 'opacity-100' : 'opacity-0 w-0'}`}>
+              设置
+            </span>
+          </div>
         </div>
 
         {/* Sidebar Toggle Button */}
@@ -2165,7 +2580,8 @@ export const App: React.FC = () => {
         {activeTab === 'assets' && renderAssetsPanel()}
         {activeTab === 'trade' && renderTradePanel()}
         {activeTab === 'orders' && renderOrders()}
-        {activeTab === 'trades' && renderTrades()}
+        {activeTab === 'trades' && renderTradesPage()}
+        {activeTab === 'settings' && renderSettings()}
 
         {/* Toast Notification - Bottom Right */}
         {currentToast && (
