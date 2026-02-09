@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { TickData, AccountInfo, OrderRequest, OrderStatus, Position, Trade, MultiAccountInfo } from './types';
+import { TickData, AccountInfo, OrderRequest, OrderStatus, Position, Trade, MultiAccountInfo, StockDetail } from './types';
 
 // ----------------------------------------------------------------------
 // TYPES & CONSTANTS
@@ -129,6 +129,7 @@ export const App: React.FC = () => {
   // Trade Form State
   const [symbol, setSymbol] = useState('600000.SH');
   const [stockName, setStockName] = useState('浦发银行');
+  const [stockDetails, setStockDetails] = useState<Record<string, StockDetail>>({});
   const [price, setPrice] = useState<string>('');
 
   // --- VOLUME STRATEGY STATE ---
@@ -497,6 +498,17 @@ export const App: React.FC = () => {
     };
   }, [addLog]);
 
+  // Fetch stock detail when symbol changes
+  useEffect(() => {
+    const fetchDetail = async () => {
+      const detail = await window.electronAPI.getStockDetail(symbol);
+      if (detail) {
+        setStockDetails(prev => ({ ...prev, [symbol]: detail }));
+      }
+    };
+    fetchDetail();
+  }, [symbol]);
+
   // DYNAMIC PRICE UPDATE LOGIC
   useEffect(() => {
     // If manual limit, do nothing
@@ -571,8 +583,10 @@ export const App: React.FC = () => {
           else target = curPrice;
           break;
         case 'CAGE': // Buy: 当前价上浮2%，但不超过涨停价
-          if (detail) {
+          if (detail?.upLimit) {
             target = Math.min(curPrice * 1.019, detail.upLimit);
+          } else {
+            target = curPrice * 1.019;
           }
           break;
         default: return null;
@@ -590,8 +604,10 @@ export const App: React.FC = () => {
           else target = curPrice;
           break;
         case 'CAGE': // Sell: 当前价下浮2%，但不低于跌停价
-          if (detail) {
+          if (detail?.downLimit) {
             target = Math.max(curPrice * 0.981, detail.downLimit);
+          } else {
+            target = curPrice * 0.981;
           }
           break;
         default: return null;
@@ -755,15 +771,13 @@ export const App: React.FC = () => {
 
     // 检查涨跌停限制
     const detail = await window.electronAPI.getStockDetail(symbol);
-    if (detail) {
-      if (action === 'BUY' && p > detail.upLimit) {
-        setErrorMessage(`买入价 ${p.toFixed(2)} 超过涨停价 ${detail.upLimit.toFixed(2)}`);
-        return;
-      }
-      if (action === 'SELL' && p < detail.downLimit) {
-        setErrorMessage(`卖出价 ${p.toFixed(2)} 低于跌停价 ${detail.downLimit.toFixed(2)}`);
-        return;
-      }
+    if (detail?.upLimit && action === 'BUY' && p > detail.upLimit) {
+      setErrorMessage(`买入价 ${p.toFixed(2)} 超过涨停价 ${detail.upLimit.toFixed(2)}`);
+      return;
+    }
+    if (detail?.downLimit && action === 'SELL' && p < detail.downLimit) {
+      setErrorMessage(`卖出价 ${p.toFixed(2)} 低于跌停价 ${detail.downLimit.toFixed(2)}`);
+      return;
     }
 
     // 计算每个账户的下单参数
@@ -962,12 +976,12 @@ export const App: React.FC = () => {
   const change = currentPrice - preClose;
   const changePercent = preClose > 0 ? (change / preClose) * 100 : 0;
 
-  // Use API Data for Limits if available, else fallback to calculation (though requirement says API provided)
-  const apiLimitUp = currentTick?.limitUp || (preClose * 1.1);
-  const apiLimitDown = currentTick?.limitDown || (preClose * 0.9);
+  const detail = stockDetails[symbol];
+  const apiLimitUp = detail?.upLimit;
+  const apiLimitDown = detail?.downLimit;
 
-  const displayLimitUp = apiLimitUp.toFixed(2);
-  const displayLimitDown = apiLimitDown.toFixed(2);
+  const displayLimitUp = apiLimitUp ? apiLimitUp.toFixed(2) : '--';
+  const displayLimitDown = apiLimitDown ? apiLimitDown.toFixed(2) : '--';
 
   // Formatting helpers
   const formatBigNum = (val?: number) => {
@@ -1715,22 +1729,22 @@ export const App: React.FC = () => {
 
   const renderTradeSummaryRow = (item: any) => {
     const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
-      <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+      <div className={`${width} px-4 py-1 text-xs flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
         {content}
       </div>
     );
     return (
       <React.Fragment>
-        {cell(<div className="font-bold text-gray-400 text-xs">{item.accountId}</div>, "w-32")}
-        {cell(<div className="font-mono font-bold text-gray-800">{item.symbol}</div>, "w-32")}
-        {cell(<div className="font-medium text-gray-700">{item.stockName}</div>, "w-32")}
-        {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${item.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>
+        {cell(<div className="font-bold text-gray-400 text-xs">{item.accountId}</div>, "w-28")}
+        {cell(<div className="font-mono font-bold text-gray-800">{item.symbol}</div>, "w-28")}
+        {cell(<div className="font-medium text-gray-700">{item.stockName}</div>, "w-28")}
+        {cell(<div className={`font-bold text-xs px-2 py-0.5 rounded ${item.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>
           {item.action === 'BUY' ? '买入' : '卖出'}
-        </div>, "w-24", "center")}
-        {cell(<div className="font-mono font-bold text-gray-800">{item.avgPrice.toFixed(2)}</div>, "w-32", "right")}
-        {cell(<div className="font-mono font-bold text-gray-800">{item.totalVolume}</div>, "w-32", "right")}
+        </div>, "w-20", "center")}
+        {cell(<div className="font-mono font-bold text-gray-800">{item.avgPrice.toFixed(2)}</div>, "w-28", "right")}
+        {cell(<div className="font-mono font-bold text-gray-800">{item.totalVolume}</div>, "w-28", "right")}
         {cell(<div className="font-mono font-bold text-red-600">{item.totalAmount.toLocaleString()}</div>, "flex-1", "right")}
-        {cell(<div className="font-mono text-gray-500">{item.tradeCount}次</div>, "w-20", "center")}
+        {cell(<div className="font-mono text-gray-500">{item.tradeCount}次</div>, "w-16", "center")}
       </React.Fragment>
     );
   };
@@ -1739,16 +1753,41 @@ export const App: React.FC = () => {
     const summaryData = calculateTradeSummary(trades);
 
     return (
-      <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
+      <div className={`flex-1 flex flex-col rounded-lg overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
+        <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1 bg-gray-50 border-b border-gray-200">
+          <span className="text-xs font-bold text-gray-500">视图：</span>
+          <button
+            onClick={() => {
+              console.log('点击成交明细');
+              setShowTradeSummary(false);
+            }}
+            className={`px-2 py-0.5 text-xs font-bold rounded transition-colors ${
+              !showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+            }`}
+          >
+            成交明细
+          </button>
+          <button
+            onClick={() => {
+              console.log('点击成交统计');
+              setShowTradeSummary(true);
+            }}
+            className={`px-2 py-0.5 text-xs font-bold rounded transition-colors ${
+              showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+            }`}
+          >
+            成交统计
+          </button>
+        </div>
         <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">账户</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">代码</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">名称</div>
-          <div className="w-24 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">方向</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">均价</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">数量</div>
-          <div className="flex-1 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">金额</div>
-          <div className="w-20 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">次数</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500">账户</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500">代码</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500">名称</div>
+          <div className="w-20 px-4 py-1 text-xs font-bold text-gray-500 text-center">方向</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500 text-right">均价</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500 text-right">数量</div>
+          <div className="flex-1 px-4 py-1 text-xs font-bold text-gray-500 text-right">金额</div>
+          <div className="w-16 px-4 py-1 text-xs font-bold text-gray-500 text-center">次数</div>
         </div>
         <div className="flex-1 overflow-y-auto bg-white">
           {summaryData.length === 0 ? (
@@ -1771,21 +1810,46 @@ export const App: React.FC = () => {
     const sortedTrades = sortTradesStable(trades);
 
     const cell = (content: React.ReactNode, width: string, align: 'left' | 'center' | 'right' = 'left') => (
-      <div className={`${width} px-6 py-2 text-sm flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
+      <div className={`${width} px-4 py-1 text-xs flex items-center ${align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : 'justify-start'}`}>
         {content}
       </div>
     );
 
     return (
-      <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
+      <div className={`flex-1 flex flex-col rounded-lg overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
+        <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1 bg-gray-50 border-b border-gray-200">
+          <span className="text-xs font-bold text-gray-500">视图：</span>
+          <button
+            onClick={() => {
+              console.log('点击成交明细');
+              setShowTradeSummary(false);
+            }}
+            className={`px-2 py-0.5 text-xs font-bold rounded transition-colors ${
+              !showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+            }`}
+          >
+            成交明细
+          </button>
+          <button
+            onClick={() => {
+              console.log('点击成交统计');
+              setShowTradeSummary(true);
+            }}
+            className={`px-2 py-0.5 text-xs font-bold rounded transition-colors ${
+              showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
+            }`}
+          >
+            成交统计
+          </button>
+        </div>
         <div className={`flex-shrink-0 flex border-b ${colors.border} bg-gray-50`}>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">时间</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">代码</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider">名称</div>
-          <div className="w-24 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-center">方向</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">价格</div>
-          <div className="w-32 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">数量</div>
-          <div className="flex-1 px-6 py-2 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">金额</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500">时间</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500">代码</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500">名称</div>
+          <div className="w-20 px-4 py-1 text-xs font-bold text-gray-500 text-center">方向</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500 text-right">价格</div>
+          <div className="w-28 px-4 py-1 text-xs font-bold text-gray-500 text-right">数量</div>
+          <div className="flex-1 px-4 py-1 text-xs font-bold text-gray-500 text-right">金额</div>
         </div>
         <div className="flex-1 overflow-y-auto bg-white">
           {sortedTrades.length === 0 ? (
@@ -1795,12 +1859,12 @@ export const App: React.FC = () => {
           ) : (
             sortedTrades.map((t, i) => (
               <div key={i} className="flex border-b last:border-b-0 border-gray-100 hover:bg-blue-50/50 transition-colors">
-                {cell(<div className="text-xs font-mono text-gray-400">{t.tradeTime}</div>, "w-32")}
-                {cell(<div className="font-mono font-bold text-gray-800">{t.symbol}</div>, "w-32")}
-                {cell(<div className="font-medium text-gray-700">{t.stockName}</div>, "w-32")}
-                {cell(<div className={`font-bold text-xs px-2 py-1 rounded ${t.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{t.action === 'BUY' ? '买入' : '卖出'}</div>, "w-24", "center")}
-                {cell(<div className="font-mono text-gray-600">{t.price.toFixed(2)}</div>, "w-32", "right")}
-                {cell(<div className="font-mono text-gray-600">{t.volume}</div>, "w-32", "right")}
+                {cell(<div className="text-xs font-mono text-gray-400">{t.tradeTime}</div>, "w-28")}
+                {cell(<div className="font-mono font-bold text-gray-800">{t.symbol}</div>, "w-28")}
+                {cell(<div className="font-medium text-gray-700">{t.stockName}</div>, "w-28")}
+                {cell(<div className={`font-bold text-xs px-2 py-0.5 rounded ${t.action === 'BUY' ? 'bg-red-50 text-red-600' : 'bg-blue-50 text-blue-600'}`}>{t.action === 'BUY' ? '买入' : '卖出'}</div>, "w-20", "center")}
+                {cell(<div className="font-mono text-gray-600">{t.price.toFixed(2)}</div>, "w-28", "right")}
+                {cell(<div className="font-mono text-gray-600">{t.volume}</div>, "w-28", "right")}
                 {cell(<div className="font-mono font-bold text-gray-800">{t.amount.toLocaleString()}</div>, "flex-1", "right")}
               </div>
             ))
@@ -1811,32 +1875,7 @@ export const App: React.FC = () => {
   };
 
   const renderTradesPage = () => (
-    <div className="h-full w-full flex flex-col p-8 pt-4">
-      <div className="flex-shrink-0 flex items-center gap-2 mb-2">
-        <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">视图：</span>
-        <button
-          onClick={() => {
-            console.log('点击成交明细');
-            setShowTradeSummary(false);
-          }}
-          className={`px-3 py-1 text-xs font-bold rounded transition-colors ${
-            !showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-          }`}
-        >
-          成交明细
-        </button>
-        <button
-          onClick={() => {
-            console.log('点击成交统计');
-            setShowTradeSummary(true);
-          }}
-          className={`px-3 py-1 text-xs font-bold rounded transition-colors ${
-            showTradeSummary ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-          }`}
-        >
-          成交统计
-        </button>
-      </div>
+    <div className="h-full w-full flex flex-col pt-12 px-2 pb-2">
       {showTradeSummary ? renderTradeSummaryTable() : renderTradeDetailTable()}
     </div>
   );
@@ -2238,7 +2277,7 @@ export const App: React.FC = () => {
                 <span>{change > 0 ? '+' : ''}{change.toFixed(2)}</span>
                 <span>{change > 0 ? '+' : ''}{changePercent.toFixed(2)}%</span>
               </div>
-            </div>
+      </div>
 
             {/* Right: 3x3 Grid Info - Removed global font-mono, applied selectively */}
             <div className="flex-1 grid grid-cols-3 gap-y-3 gap-x-8 text-sm mt-1">
@@ -2260,12 +2299,12 @@ export const App: React.FC = () => {
           </div>
 
           {/* Chart Placeholder */}
-          <div className={`flex-1 rounded-2xl border-2 border-dashed transition-all border-gray-300 bg-gray-50 flex items-center justify-center group cursor-crosshair`}>
-            <div className="text-center opacity-30 group-hover:opacity-50 transition-opacity">
-              <svg className="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
-              <span className="text-xs font-bold tracking-[0.2em] uppercase text-gray-500">K线图区域</span>
-            </div>
+        <div className={`flex-1 rounded-2xl border-2 border-dashed transition-all border-gray-300 bg-gray-50 flex items-center justify-center group cursor-crosshair`}>
+          <div className="text-center opacity-30 group-hover:opacity-50 transition-opacity">
+            <svg className="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
+            <span className="text-xs font-bold tracking-[0.2em] uppercase text-gray-500">K线图区域</span>
           </div>
+        </div>
         </div>
       </div>
 
@@ -2277,9 +2316,9 @@ export const App: React.FC = () => {
         </div>
         <div className="flex-1 overflow-y-auto relative">
           {renderPositionsTableContent()}
-        </div>
+      </div>
 
-        {/* Error Modal */}
+      {/* Error Modal */}
         {errorMessage && (
           <div className="fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm flex items-center justify-center fade-in">
             <div className="bg-white rounded-2xl shadow-2xl p-6 w-[360px] transform scale-100 transition-all border border-gray-200">
@@ -2398,7 +2437,7 @@ export const App: React.FC = () => {
       </div>
     </div>
   );
- 
+
   return (
     <div className={`h-screen w-screen overflow-hidden flex flex-row ${colors.appBg}`}>
       {/* -- START Custom CSS for Electron Drag & Selection -- */}
