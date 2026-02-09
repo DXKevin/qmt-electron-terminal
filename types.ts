@@ -155,6 +155,7 @@ export interface IElectronAPI {
 export interface TradeSettings {
   buyPresets: number[];
   sellPresets: number[];
+  volumeStep: number;
 }
 
 declare global {

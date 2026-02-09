@@ -149,6 +149,8 @@ export const App: React.FC = () => {
   const [tempSellPresets, setTempSellPresets] = useState<number[]>(DEFAULT_SELL_PRESETS);
   const [buyPresets, setBuyPresets] = useState<number[]>(DEFAULT_BUY_PRESETS);
   const [sellPresets, setSellPresets] = useState<number[]>(DEFAULT_SELL_PRESETS);
+  const [tempVolumeStep, setTempVolumeStep] = useState<number>(100);
+  const [volumeStep, setVolumeStep] = useState<number>(100);
   const [tempAccountRemarks, setTempAccountRemarks] = useState<Record<string, string>>({});
   const [accountRemarks, setAccountRemarks] = useState<Record<string, string>>({});
 
@@ -256,6 +258,10 @@ export const App: React.FC = () => {
         if (parsed.buyPresets && parsed.sellPresets) {
           setBuyPresets(parsed.buyPresets);
           setSellPresets(parsed.sellPresets);
+        }
+        if (parsed.volumeStep && parsed.volumeStep > 0) {
+          setVolumeStep(parsed.volumeStep);
+          setTempVolumeStep(parsed.volumeStep);
         }
         if (parsed.accountRemarks) {
           setAccountRemarks(parsed.accountRemarks);
@@ -569,6 +575,9 @@ export const App: React.FC = () => {
     const curPrice = tick.lastPrice;
     const asks = tick.asks || [];
     const bids = tick.bids || [];
+    const symbol = tick.symbol || '';
+    // 判断是否为科创板股票（68开头）
+    const isKeChuang = symbol.startsWith('68');
     let target = 0;
 
     if (side === 'BUY') {
@@ -582,11 +591,16 @@ export const App: React.FC = () => {
           if (asks.length > 0) target = asks[0][0];
           else target = curPrice;
           break;
-        case 'CAGE': // Buy: 当前价上浮2%，但不超过涨停价
-          if (detail?.upLimit) {
-            target = Math.min(curPrice * 1.019, detail.upLimit);
+        case 'CAGE': // Buy: max(当前价*1.02舍去第3位小数, 当前价+0.10) 科创板跳过10*0.01规则
+          const buyPrice2Percent = Math.floor(curPrice * 1.02 * 100) / 100; // 舍去第3位小数
+          if (isKeChuang) {
+            target = buyPrice2Percent; // 科创板：只使用2%规则
           } else {
-            target = curPrice * 1.019;
+            target = Math.max(buyPrice2Percent, curPrice + 0.10); // 普通股票：使用max规则
+          }
+          // 如果有涨停价限制，取较小值
+          if (detail?.upLimit) {
+            target = Math.min(target, detail.upLimit);
           }
           break;
         default: return null;
@@ -603,11 +617,16 @@ export const App: React.FC = () => {
           if (bids.length > 0) target = bids[0][0];
           else target = curPrice;
           break;
-        case 'CAGE': // Sell: 当前价下浮2%，但不低于跌停价
-          if (detail?.downLimit) {
-            target = Math.max(curPrice * 0.981, detail.downLimit);
+        case 'CAGE': // Sell: min(当前价*0.98向上取整, 当前价-0.10) 科创板跳过10*0.01规则
+          const sellPrice2Percent = Math.ceil(curPrice * 0.98 * 100) / 100; // 向上取整，有第3位小数就进1
+          if (isKeChuang) {
+            target = sellPrice2Percent; // 科创板：只使用2%规则
           } else {
-            target = curPrice * 0.981;
+            target = Math.min(sellPrice2Percent, curPrice - 0.10); // 普通股票：使用min规则
+          }
+          // 如果有跌停价限制，取较大值
+          if (detail?.downLimit) {
+            target = Math.max(target, detail.downLimit);
           }
           break;
         default: return null;
@@ -677,7 +696,7 @@ export const App: React.FC = () => {
     if (volStrategy.type === 'MANUAL') {
       base = parseInt(volStrategy.value) || 0;
     }
-    const newVal = Math.max(0, base + (direction * 100));
+    const newVal = Math.max(0, base + (direction * volumeStep));
     setVolStrategy({ type: 'MANUAL', value: newVal.toString() });
   };
 
@@ -812,10 +831,43 @@ export const App: React.FC = () => {
       };
     });
 
-    // 过滤出有效账户（数量 > 0）
-    const validOrders = accountOrders.filter(a => a.volume > 0);
+    // 检查资金和持仓限制，过滤出有效的账户
+    const errors: string[] = [];
+    const validOrders = accountOrders.filter(order => {
+      if (action === 'BUY') {
+        // 买入时检查资金是否充足
+        const accData = assetsMap[order.id];
+        if (!accData) {
+          errors.push(`账户 ${order.id} 资金信息未获取`);
+          return false;
+        }
+        if (accData.cash < order.amount) {
+          errors.push(`账户 ${order.id} 可用资金不足 (需要 ${order.amount.toLocaleString()}元，可用 ${accData.cash.toLocaleString()}元)`);
+          return false;
+        }
+        return order.volume > 0;
+      } else {
+        // 卖出时检查持仓是否充足
+        const pos = positions.find(po => po.accountId === order.id && po.symbol === symbol);
+        if (!pos) {
+          errors.push(`账户 ${order.id} 无该股票持仓`);
+          return false;
+        }
+        if (pos.canUseVolume < order.volume) {
+          errors.push(`账户 ${order.id} 可用持仓不足 (需要 ${order.volume.toLocaleString()}股，可用 ${pos.canUseVolume.toLocaleString()}股)`);
+          return false;
+        }
+        return order.volume > 0;
+      }
+    });
+
+    // 如果没有账户通过检查，显示所有错误
     if (validOrders.length === 0) {
-      setErrorMessage("所选账户均无该股票持仓");
+      if (errors.length > 0) {
+        setErrorMessage(`以下账户无法下单:\n${errors.join('\n')}`);
+      } else {
+        setErrorMessage(action === 'BUY' ? "所选账户可用资金不足或无法计算买入数量" : "所选账户均无该股票持仓");
+      }
       return;
     }
 
@@ -1110,7 +1162,7 @@ export const App: React.FC = () => {
   };
 
   const renderAccountSelector = () => (
-    <div className={`w-[220px] flex flex-col rounded-3xl overflow-hidden shadow-sm ${colors.card} flex-shrink-0`}>
+    <div className={`w-full flex flex-col rounded-3xl overflow-hidden shadow-sm ${colors.card} flex-shrink-0`}>
       <div className="bg-gray-50 border-b border-gray-200 p-3 flex justify-between items-center">
         <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">多账户选择</span>
         <button
@@ -1356,35 +1408,35 @@ export const App: React.FC = () => {
           <table className="w-full text-left border-collapse">
             <thead className="bg-gray-50 sticky top-0 z-10">
               <tr>
-                <th className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider">账户</th>
-                <th className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider">代码/名称</th>
+                <th className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider">账户</th>
+                <th className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider">代码/名称</th>
                 <th
-                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
                   onClick={() => handlePositionSort('canUseVolume')}
                 >
                   持仓/可用 {renderPositionSortIndicator('canUseVolume')}
                 </th>
-                <th className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right">现价/成本</th>
+                <th className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider text-right">现价/成本</th>
                 <th
-                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
                   onClick={() => handlePositionSort('changePercent')}
                 >
                   涨幅 {renderPositionSortIndicator('changePercent')}
                 </th>
                 <th
-                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
                   onClick={() => handlePositionSort('ratio')}
                 >
                   资产占比 {renderPositionSortIndicator('ratio')}
                 </th>
                 <th
-                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
                   onClick={() => handlePositionSort('marketValue')}
                 >
                   市值 {renderPositionSortIndicator('marketValue')}
                 </th>
                 <th
-                  className="px-6 py-3 text-sm font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
+                  className="px-2 py-1 text-xs font-bold text-gray-500 uppercase tracking-wider text-right cursor-pointer hover:bg-gray-100 transition-colors"
                   onClick={() => handlePositionSort('profit')}
                 >
                   盈亏 {renderPositionSortIndicator('profit')}
@@ -1394,7 +1446,7 @@ export const App: React.FC = () => {
             <tbody className="divide-y divide-gray-200 bg-white">
               {sortedPositions.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-12 text-center text-gray-400 text-sm">暂无持仓数据</td>
+                  <td colSpan={8} className="px-2 py-4 text-center text-gray-400 text-xs">暂无持仓数据</td>
                 </tr>
               ) : (
                 sortedPositions.map((pos) => {
@@ -1426,35 +1478,35 @@ export const App: React.FC = () => {
                         setStockName(detail.name);
                       }
                     }}>
-                      <td className="px-6 py-3">
+                      <td className="px-2 py-1">
                         <div className="text-xs font-bold text-gray-500">{pos.accountId}</div>
                       </td>
-                      <td className="px-6 py-3">
+                      <td className="px-2 py-1">
                         <div className="text-sm font-bold text-gray-900">{pos.stockName}</div>
                         <div className="text-xs font-mono text-gray-400">{pos.symbol}</div>
                       </td>
-                      <td className="px-6 py-3 text-right">
+                      <td className="px-2 py-1 text-right">
                         <div className="text-sm font-bold text-gray-900">{pos.volume}</div>
                         <div className="text-xs font-bold text-blue-600">可卖 {pos.canUseVolume}</div>
                       </td>
-                      <td className="px-6 py-3 text-right">
+                      <td className="px-2 py-1 text-right">
                         <div className={`text-sm font-mono font-bold ${priceColor}`}>{curPrice.toFixed(2)}</div>
                         <div className="text-xs font-mono text-gray-400">{(pos.openPrice ?? 0).toFixed(2)}</div>
                       </td>
-                      <td className="px-6 py-3 text-right">
+                      <td className="px-2 py-1 text-right">
                         <div className={`text-sm font-mono ${changeColor}`}>
                           {changePercent === null ? '--' : `${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}%`}
                         </div>
                       </td>
-                      <td className="px-6 py-3 text-right">
+                      <td className="px-2 py-1 text-right">
                         <div className="text-sm font-mono text-gray-500">
                           {ratio === null ? '--' : `${ratio.toFixed(2)}%`}
                         </div>
                       </td>
-                      <td className="px-6 py-3 text-right">
+                      <td className="px-2 py-1 text-right">
                         <div className="text-sm font-mono font-bold text-gray-900">{pos.marketValue.toLocaleString()}</div>
                       </td>
-                      <td className="px-6 py-3 text-right">
+                      <td className="px-2 py-1 text-right">
                         <div className={`text-sm font-mono font-bold ${profitColor}`}>
                           {profit >= 0 ? '+' : ''}{profit.toLocaleString()}
                         </div>
@@ -1470,16 +1522,16 @@ export const App: React.FC = () => {
             </tbody>
             <tfoot className="bg-white font-bold border-t border-gray-200 sticky bottom-0">
               <tr>
-                <td className="px-6 py-3"></td>
-                <td className="px-6 py-3"></td>
-                <td className="px-6 py-3 text-right"></td>
-                <td className="px-6 py-3 text-right"></td>
-                <td className="px-6 py-3 text-right"></td>
-                <td className="px-6 py-3 text-right"></td>
-                <td className="px-6 py-3 text-right font-mono text-gray-900">
+                <td className="px-2 py-1"></td>
+                <td className="px-2 py-1"></td>
+                <td className="px-2 py-1 text-right"></td>
+                <td className="px-2 py-1 text-right"></td>
+                <td className="px-2 py-1 text-right"></td>
+                <td className="px-2 py-1 text-right"></td>
+                <td className="px-2 py-1 text-right font-mono text-gray-900">
                   {totalMarketValue.toLocaleString()}
                 </td>
-                <td className="px-6 py-3 text-right font-mono">
+                <td className="px-2 py-1 text-right font-mono">
                   <span className={totalProfit >= 0 ? "text-red-600" : "text-green-600"}>
                     {totalProfit >= 0 ? "+" : ""}{totalProfit.toLocaleString()}
                   </span>
@@ -1520,15 +1572,6 @@ export const App: React.FC = () => {
     <div className="h-full w-full flex flex-col p-8 pt-12">
       {/* Action Bar */}
       <div className="flex items-center gap-4 mb-4">
-        <div className="flex bg-white rounded-xl shadow-sm border border-gray-200 p-1">
-          <button
-            onClick={handleSelectAllOrders}
-            className="px-4 py-1.5 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            全选
-          </button>
-        </div>
-
         {/* Cancellable Filter */}
         <label className="flex items-center space-x-2 text-xs font-bold text-gray-600 bg-white px-3 py-1.5 rounded-xl border border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors select-none">
           <input
@@ -1556,6 +1599,15 @@ export const App: React.FC = () => {
 
         <div className="flex-1" />
         <span className="text-xs text-gray-400 font-medium">共 {orders.length} 笔委托</span>
+
+        <div className="flex bg-white rounded-xl shadow-sm border border-gray-200 p-1">
+          <button
+            onClick={handleSelectAllOrders}
+            className="px-4 py-1.5 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            全选
+          </button>
+        </div>
       </div>
 
         <div className={`flex-1 flex flex-col rounded-2xl overflow-hidden shadow-sm ${colors.card} min-w-[1000px]`}>
@@ -1958,6 +2010,29 @@ export const App: React.FC = () => {
             </div>
           </div>
 
+          {/* Volume Step */}
+          <div className="mb-8">
+            <div className="text-sm font-bold text-gray-700 mb-3">数量调整步长（股）</div>
+            <div className="w-32">
+              <input
+                type="number"
+                min="1"
+                max="10000"
+                step="100"
+                value={tempVolumeStep}
+                onChange={(e) => {
+                  const val = Math.min(10000, Math.max(1, parseInt(e.target.value) || 100));
+                  setTempVolumeStep(val);
+                }}
+                className="w-full py-2 px-3 rounded-lg border border-gray-300 text-center font-mono text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                placeholder="100"
+              />
+            </div>
+            <div className="text-xs text-gray-500 mt-2">
+              设置数量输入框加减按钮每次变动的股数，默认100股
+            </div>
+          </div>
+
           {/* Account Remarks */}
           <div className="mb-8">
             <div className="text-sm font-bold text-gray-700 mb-3">账户备注</div>
@@ -1990,10 +2065,12 @@ export const App: React.FC = () => {
               onClick={() => {
                 setBuyPresets(tempBuyPresets);
                 setSellPresets(tempSellPresets);
+                setVolumeStep(tempVolumeStep);
                 setAccountRemarks(tempAccountRemarks);
                 localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
                   buyPresets: tempBuyPresets,
                   sellPresets: tempSellPresets,
+                  volumeStep: tempVolumeStep,
                   accountRemarks: tempAccountRemarks
                 }));
               }}
@@ -2008,16 +2085,18 @@ export const App: React.FC = () => {
   );
 
   const renderTradePanel = () => (
-    <div className="flex flex-col h-full w-full p-6 gap-6 pt-12"> {/* Increased top padding for window controls */}
+    <div className="flex flex-col h-full w-full p-6 gap-5 pt-12"> {/* Increased top padding for window controls */}
 
-      {/* TOP ROW: Accounts | Trade Form | Order Book | Chart */}
-      <div className="flex w-full gap-5 h-[450px] shrink-0">
+      {/* 使用 Grid 布局: 第一行 450px 高度，第二行填充剩余空间 */}
+      <div className="grid grid-rows-[450px_1fr] grid-cols-[minmax(120px,0.8fr)_minmax(180px,1fr)_minmax(120px,0.8fr)_minmax(350px,3.0fr)] gap-4 h-full">
 
-        {/* 0. Multi-Account Selector */}
-        {renderAccountSelector()}
+        {/* 第一行 - 左侧: 多账户选择 */}
+        <div className="row-start-1 col-start-1">
+          {renderAccountSelector()}
+        </div>
 
-        {/* 1. Trade Form */}
-        <div className={`w-[280px] flex flex-col rounded-3xl overflow-hidden shadow-sm transition-all ${colors.card}`}>
+        {/* 第一行 - 左侧: 买卖表单 */}
+        <div className={`row-start-1 col-start-2 flex flex-col rounded-3xl overflow-hidden shadow-sm transition-all ${colors.card}`}>
 
           {/* Tabs */}
           <div className="flex p-1.5 gap-1.5 bg-gray-100 border-b border-gray-200 flex-shrink-0">
@@ -2044,6 +2123,12 @@ export const App: React.FC = () => {
                 type="text"
                 value={symbol}
                 onChange={handleSymbolChange}
+                onKeyDown={(e) => {
+                  if (e.key === 'Delete' || e.key === 'Backspace') {
+                    setSymbol('');
+                    setStockName('');
+                  }
+                }}
                 spellCheck="false"
                 autoComplete="off"
                 className={`w-full py-1.5 px-4 rounded-xl border-2 outline-none font-mono text-lg font-bold uppercase tracking-wide transition-all ${colors.input}`}
@@ -2248,74 +2333,78 @@ export const App: React.FC = () => {
           </div>
         </div>
 
-        {/* 2. Order Book (Next to Trade Form) */}
-        <div className={`w-[220px] flex flex-col rounded-3xl p-5 flex-shrink-0 shadow-sm ${colors.card}`}>
-          <div className="flex justify-between items-center mb-2">
-            <span className={`text-sm font-bold tracking-widest text-gray-400`}>五档盘口</span>
-            <div className="flex space-x-1">
-              <div className="w-1.5 h-1.5 rounded-full bg-red-500 opacity-50"></div>
-              <div className="w-1.5 h-1.5 rounded-full bg-blue-500 opacity-50"></div>
+        {/* 第一行 - 左侧: 五档盘口 */}
+        <div className="row-start-1 col-start-3">
+          <div className={`w-full h-full flex flex-col rounded-3xl p-5 flex-shrink-0 shadow-sm ${colors.card}`}>
+            <div className="flex justify-between items-center mb-2">
+              <span className={`text-sm font-bold tracking-widest text-gray-400`}>五档盘口</span>
+              <div className="flex space-x-1">
+                <div className="w-1.5 h-1.5 rounded-full bg-red-500 opacity-50"></div>
+                <div className="w-1.5 h-1.5 rounded-full bg-blue-500 opacity-50"></div>
+              </div>
+            </div>
+            <div className="flex-1 overflow-hidden relative">
+              {renderOrderBook()}
             </div>
           </div>
-          <div className="flex-1 overflow-hidden relative">
-            {renderOrderBook()}
+        </div>
+
+        {/* 右侧: 持仓列表 (跨越两行) */}
+        <div className={`row-span-2 col-start-4 rounded-3xl overflow-hidden shadow-sm ${colors.card} min-h-0 flex flex-col`}>
+          <div className={`px-6 py-4 border-b ${colors.border} bg-gray-50 flex justify-between items-center flex-shrink-0`}>
+            <h3 className="font-bold text-gray-700">持仓列表</h3>
+          </div>
+          <div className="flex-1 overflow-y-auto relative min-h-0">
+            {renderPositionsTableContent()}
           </div>
         </div>
 
-        {/* 3. Stock Info & Chart (Right side, fills remaining) */}
-        <div className={`flex-1 flex flex-col rounded-3xl p-6 ${colors.card} relative overflow-hidden shadow-sm`}>
-          {/* Header Grid Layout - Matches User's Screenshot */}
-          <div className="flex justify-between items-start mb-4 select-none">
-            {/* Left: Huge Price */}
-            <div className="flex flex-col mr-6">
-              {/* Price - Removed tracking-tighter for cleaner look */}
-              <div className={`text-6xl font-bold leading-none ${getPriceColor(currentPrice, preClose)}`}>
-                {currentPrice > 0 ? currentPrice.toFixed(2) : '--.--'}
+        {/* 第二行 - 左侧: K线区域 (占据前三列) */}
+        <div className="row-start-2 col-span-3 w-full">
+          <div className={`h-full w-full flex flex-col rounded-3xl p-6 ${colors.card} relative overflow-hidden shadow-sm`}>
+            {/* Header Grid Layout - Matches User's Screenshot */}
+            <div className="w-full flex justify-between items-start mb-4 select-none flex-shrink-0">
+              {/* Left: Huge Price */}
+              <div className="flex flex-col mr-6 flex-shrink-0">
+                {/* Price - Removed tracking-tighter for cleaner look */}
+                <div className={`text-5xl font-bold leading-none ${getPriceColor(currentPrice, preClose)}`}>
+                  {currentPrice > 0 ? currentPrice.toFixed(2) : '--.--'}
+                </div>
+                {/* Change Info */}
+                <div className={`flex items-center space-x-4 mt-2 font-bold text-lg ${getPriceColor(currentPrice, preClose)}`}>
+                  <span>{change > 0 ? '+' : ''}{change.toFixed(2)}</span>
+                  <span>{change > 0 ? '+' : ''}{changePercent.toFixed(2)}%</span>
+                </div>
               </div>
-              {/* Change Info */}
-              <div className={`flex items-center space-x-4 mt-2 font-bold text-xl ${getPriceColor(currentPrice, preClose)}`}>
-                <span>{change > 0 ? '+' : ''}{change.toFixed(2)}</span>
-                <span>{change > 0 ? '+' : ''}{changePercent.toFixed(2)}%</span>
+
+              {/* Right: 3x3 Grid Info - Removed global font-mono, applied selectively */}
+              <div className="flex-1 min-w-0 grid grid-cols-3 gap-y-3 gap-x-4 text-sm mt-1">
+                {/* Row 1 */}
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最高</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.high || 0, preClose)}`}>{currentTick?.high?.toFixed(2) || '--'}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">市值</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.totalValue)}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">量比</span><span className="text-red-600 font-bold font-mono">{currentTick?.volRatio || '--'}</span></div>
+
+                {/* Row 2 */}
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最低</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.low || 0, preClose)}`}>{currentTick?.low?.toFixed(2) || '--'}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">流通</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.currencyValue)}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">换手</span><span className="text-gray-800 font-bold font-mono">{currentTick?.turnoverRate ? currentTick.turnoverRate + '%' : '--'}</span></div>
+
+                {/* Row 3 */}
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">今开</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.open || 0, preClose)}`}>{currentTick?.open?.toFixed(2) || '--'}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">市盈</span><span className="text-gray-800 font-bold font-mono">{currentTick?.pe || '--'}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">成交额</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.amount)}</span></div>
               </div>
-      </div>
+            </div>
 
-            {/* Right: 3x3 Grid Info - Removed global font-mono, applied selectively */}
-            <div className="flex-1 grid grid-cols-3 gap-y-3 gap-x-8 text-sm mt-1">
-              {/* Row 1 */}
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最高</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.high || 0, preClose)}`}>{currentTick?.high?.toFixed(2) || '--'}</span></div>
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">市值</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.totalValue)}</span></div>
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">量比</span><span className="text-red-600 font-bold font-mono">{currentTick?.volRatio || '--'}</span></div>
-
-              {/* Row 2 */}
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最低</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.low || 0, preClose)}`}>{currentTick?.low?.toFixed(2) || '--'}</span></div>
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">流通</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.currencyValue)}</span></div>
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">换手</span><span className="text-gray-800 font-bold font-mono">{currentTick?.turnoverRate ? currentTick.turnoverRate + '%' : '--'}</span></div>
-
-              {/* Row 3 */}
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">今开</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.open || 0, preClose)}`}>{currentTick?.open?.toFixed(2) || '--'}</span></div>
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">市盈</span><span className="text-gray-800 font-bold font-mono">{currentTick?.pe || '--'}</span></div>
-              <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">成交额</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.amount)}</span></div>
+            {/* Chart Placeholder */}
+            <div className={`flex-1 rounded-2xl border-2 border-dashed transition-all border-gray-300 bg-gray-50 flex items-center justify-center group cursor-crosshair min-h-0`}>
+              <div className="text-center opacity-30 group-hover:opacity-50 transition-opacity">
+                <svg className="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
+                <span className="text-xs font-bold tracking-[0.2em] uppercase text-gray-500">K线图区域</span>
+              </div>
             </div>
           </div>
-
-          {/* Chart Placeholder */}
-        <div className={`flex-1 rounded-2xl border-2 border-dashed transition-all border-gray-300 bg-gray-50 flex items-center justify-center group cursor-crosshair`}>
-          <div className="text-center opacity-30 group-hover:opacity-50 transition-opacity">
-            <svg className="w-12 h-12 mx-auto mb-2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M7 12l3-3 3 3 4-4M8 21l4-4 4 4M3 4h18M4 4h16v12a1 1 0 01-1 1H5a1 1 0 01-1-1V4z" /></svg>
-            <span className="text-xs font-bold tracking-[0.2em] uppercase text-gray-500">K线图区域</span>
-          </div>
         </div>
-        </div>
-      </div>
-
-      {/* BOTTOM ROW: Positions Table */}
-      <div className={`flex-1 flex flex-col rounded-3xl overflow-hidden shadow-sm ${colors.card} min-h-0`}>
-        <div className={`px-6 py-4 border-b ${colors.border} bg-gray-50 flex justify-between items-center`}>
-          <h3 className="font-bold text-gray-700">持仓列表</h3>
-          {/* Removed 'View All' link as this is now the main view */}
-        </div>
-        <div className="flex-1 overflow-y-auto relative">
-          {renderPositionsTableContent()}
       </div>
 
       {/* Error Modal */}
@@ -2435,7 +2524,6 @@ export const App: React.FC = () => {
         )}
 
       </div>
-    </div>
   );
 
   return (
@@ -2622,9 +2710,9 @@ export const App: React.FC = () => {
         {activeTab === 'trades' && renderTradesPage()}
         {activeTab === 'settings' && renderSettings()}
 
-        {/* Toast Notification - Bottom Right */}
+        {/* Toast Notification - Top Right */}
         {currentToast && (
-          <div className="fixed bottom-6 right-6 z-[200] animate-fade-in">
+          <div className="fixed top-6 right-6 z-[200] animate-fade-in">
             <div className={`px-4 py-3 rounded-lg shadow-lg text-white max-w-[800px] ${
               currentToast.type === 'error' ? 'bg-red-600' :
               currentToast.type === 'success' ? 'bg-green-600' : 'bg-blue-600'
