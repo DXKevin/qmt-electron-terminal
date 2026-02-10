@@ -50,6 +50,20 @@ type PriceMode = 'LIMIT' | 'BEST_5' | 'OPPOSITE' | 'CAGE';
 
 const STOCK_MAP: Record<string, string> = {};
 
+// 逆回购代码固定列表
+const REVERSE_REPO_CODES = ['131810.SZ'];
+
+// 判断是否为逆回购代码
+const isReverseRepo = (symbol: string) => {
+  if (!symbol) return false;
+  if (symbol.includes('.')) {
+    return REVERSE_REPO_CODES.includes(symbol);
+  }
+  // 无前缀时判断基础代码（必须是完整的6位代码）
+  if (symbol.length !== 6) return false;
+  return REVERSE_REPO_CODES.some(code => code.startsWith(symbol));
+};
+
 // Mock Accounts - To be connected to backend data
 const MOCK_MULTI_ACCOUNTS: any[] = [];
 
@@ -632,7 +646,7 @@ export const App: React.FC = () => {
         default: return null;
       }
     }
-    return target > 0 ? target.toFixed(2) : null;
+    return target > 0 ? target.toFixed(isReverseRepo(symbol) ? 3 : 2) : null;
   };
 
   const handleSymbolChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -642,7 +656,14 @@ export const App: React.FC = () => {
     const isDeleting = nativeEvent.inputType && nativeEvent.inputType.startsWith('delete');
 
     if (!isDeleting && /^\d{6}$/.test(val)) {
-      if (val.startsWith('6') || val.startsWith('9')) val += '.SH';
+      if (isReverseRepo(val)) {
+        // 逆回购代码：1开头深圳
+        val += '.SZ';
+        // 逆回购自动切换到卖出模式和对价模式
+        setTradeSide('SELL');
+        setPriceType('OPPOSITE');
+      } else if (val.startsWith('6')) val += '.SH';
+      else if (val.startsWith('9')) val += '.BJ';
       else if (val.startsWith('0') || val.startsWith('3')) val += '.SZ';
       else if (val.startsWith('8') || val.startsWith('4')) val += '.BJ';
     }
@@ -687,7 +708,7 @@ export const App: React.FC = () => {
     if (!val) return;
     const step = Math.max(val * 0.001, 0.01);
     const newVal = val + (direction * step);
-    setPrice(newVal.toFixed(2));
+    setPrice(newVal.toFixed(isReverseRepo(symbol) ? 3 : 2));
   };
 
   // Switch to Manual Mode on adjustment
@@ -702,6 +723,7 @@ export const App: React.FC = () => {
 
   // Set Ratio Mode
   const handleQuickVolume = (ratio: number) => {
+    // 设置仓位比例（逆回购和普通股票逻辑相同，数量都在handleSubmitOrder中计算）
     const percent = Math.round(ratio * 100);
     const label = percent === 100 ? '全仓' : `${percent}%`;
     setVolStrategy({ type: 'RATIO', value: ratio, label });
@@ -763,7 +785,7 @@ export const App: React.FC = () => {
   // Handle Static Limit Price Click (Limit Up/Down)
   const handleLimitPriceFill = (limitPrice: number) => {
     if (limitPrice && limitPrice > 0) {
-      setPrice(limitPrice.toFixed(2));
+      setPrice(limitPrice.toFixed(isReverseRepo(symbol) ? 3 : 2));
       setPriceType('LIMIT'); // Set to Manual Mode (White Background), not dynamic
     }
   };
@@ -791,11 +813,13 @@ export const App: React.FC = () => {
     // 检查涨跌停限制
     const detail = await window.electronAPI.getStockDetail(symbol);
     if (detail?.upLimit && action === 'BUY' && p > detail.upLimit) {
-      setErrorMessage(`买入价 ${p.toFixed(2)} 超过涨停价 ${detail.upLimit.toFixed(2)}`);
+      const decimals = isReverseRepo(symbol) ? 3 : 2;
+      setErrorMessage(`买入价 ${p.toFixed(decimals)} 超过涨停价 ${detail.upLimit.toFixed(decimals)}`);
       return;
     }
     if (detail?.downLimit && action === 'SELL' && p < detail.downLimit) {
-      setErrorMessage(`卖出价 ${p.toFixed(2)} 低于跌停价 ${detail.downLimit.toFixed(2)}`);
+      const decimals = isReverseRepo(symbol) ? 3 : 2;
+      setErrorMessage(`卖出价 ${p.toFixed(decimals)} 低于跌停价 ${detail.downLimit.toFixed(decimals)}`);
       return;
     }
 
@@ -803,7 +827,15 @@ export const App: React.FC = () => {
     const accountOrders = selectedAccountIds.map(accId => {
       let finalVolume = 0;
 
-      if (volStrategy.type === 'AMOUNT') {
+      // 逆回购卖出：只支持RATIO和MANUAL模式
+      if (action === 'SELL' && isReverseRepo(symbol)) {
+        if (volStrategy.type === 'MANUAL') {
+          // 手动输入张数
+          finalVolume = parseInt(volStrategy.value) || 0;
+          finalVolume = Math.floor(finalVolume / 10) * 10;  // 确保10的倍数
+        }
+        // RATIO模式在下面的else分支统一处理
+      } else if (volStrategy.type === 'AMOUNT') {
         finalVolume = calculateVolumeFromAmount(volStrategy.value, p);
       } else if (volStrategy.type === 'MANUAL') {
         finalVolume = parseInt(volStrategy.value) || 0;
@@ -816,6 +848,17 @@ export const App: React.FC = () => {
             const targetCash = accData.cash * ratio;
             finalVolume = Math.floor((targetCash / p) / 100) * 100;
           }
+        } else if (isReverseRepo(symbol)) {
+          // 逆回购卖出：根据资金比例计算张数（1张=100元，最少10张）
+          const accData = assetsMap[accId];
+          if (accData) {
+            // 直接计算张数：资金(元) × 比例 ÷ 每张面值(100元)
+            const targetZhang = Math.floor((accData.cash * ratio) / 100);
+            // 确保最少10张（1000元）
+            if (targetZhang >= 10) {
+              finalVolume = Math.floor(targetZhang / 10) * 10;
+            }
+          }
         } else {
           const pos = positions.find(po => po.accountId === accId && po.symbol === symbol);
           if (pos) {
@@ -827,7 +870,7 @@ export const App: React.FC = () => {
       return {
         id: accId,
         volume: finalVolume,
-        amount: finalVolume * p
+        amount: isReverseRepo(symbol) ? finalVolume * 100 : finalVolume * p
       };
     });
 
@@ -845,9 +888,31 @@ export const App: React.FC = () => {
           errors.push(`账户 ${order.id} 可用资金不足 (需要 ${order.amount.toLocaleString()}元，可用 ${accData.cash.toLocaleString()}元)`);
           return false;
         }
-        return order.volume > 0;
+        if (order.volume <= 0) {
+          errors.push(`账户 ${order.id} 买入数量为0`);
+          return false;
+        }
+        return true;
       } else {
         // 卖出时检查持仓是否充足
+        // 逆回购卖出：检查资金是否充足
+        if (isReverseRepo(symbol)) {
+          const accData = assetsMap[order.id];
+          if (!accData) {
+            errors.push(`账户 ${order.id} 资金信息未获取`);
+            return false;
+          }
+          if (accData.cash < order.amount) {
+            errors.push(`账户 ${order.id} 可用资金不足 (需要 ${order.amount.toLocaleString()}元，可用 ${accData.cash.toLocaleString()}元)`);
+            return false;
+          }
+          if (order.volume <= 0) {
+            errors.push(`账户 ${order.id} 逆回购数量为0`);
+            return false;
+          }
+          return true;
+        }
+        
         const pos = positions.find(po => po.accountId === order.id && po.symbol === symbol);
         if (!pos) {
           errors.push(`账户 ${order.id} 无该股票持仓`);
@@ -857,7 +922,11 @@ export const App: React.FC = () => {
           errors.push(`账户 ${order.id} 可用持仓不足 (需要 ${order.volume.toLocaleString()}股，可用 ${pos.canUseVolume.toLocaleString()}股)`);
           return false;
         }
-        return order.volume > 0;
+        if (order.volume <= 0) {
+          errors.push(`账户 ${order.id} 卖出数量为0`);
+          return false;
+        }
+        return true;
       }
     });
 
@@ -865,6 +934,8 @@ export const App: React.FC = () => {
     if (validOrders.length === 0) {
       if (errors.length > 0) {
         setErrorMessage(`以下账户无法下单:\n${errors.join('\n')}`);
+      } else if (isReverseRepo(symbol)) {
+        setErrorMessage("逆回购需要可用资金，所选账户资金不足或无法计算数量");
       } else {
         setErrorMessage(action === 'BUY' ? "所选账户可用资金不足或无法计算买入数量" : "所选账户均无该股票持仓");
       }
@@ -1032,8 +1103,9 @@ export const App: React.FC = () => {
   const apiLimitUp = detail?.upLimit;
   const apiLimitDown = detail?.downLimit;
 
-  const displayLimitUp = apiLimitUp ? apiLimitUp.toFixed(2) : '--';
-  const displayLimitDown = apiLimitDown ? apiLimitDown.toFixed(2) : '--';
+  const priceDecimals = isReverseRepo(symbol) ? 3 : 2;
+  const displayLimitUp = apiLimitUp ? apiLimitUp.toFixed(priceDecimals) : '--';
+  const displayLimitDown = apiLimitDown ? apiLimitDown.toFixed(priceDecimals) : '--';
 
   // Formatting helpers
   const formatBigNum = (val?: number) => {
@@ -1098,7 +1170,7 @@ export const App: React.FC = () => {
     const visibleBids = bids.length > 0 ? [...bids].slice(0, 5) : [];
     const maxVol = asks.length > 0 || bids.length > 0 ? Math.max(...asks.map(a => a[1]), ...bids.map(b => b[1]), 1) : 1;
 
-    const formatPrice = (price: number) => price > 0 ? price.toFixed(2) : '--';
+    const formatPrice = (price: number) => price > 0 ? price.toFixed(isReverseRepo(symbol) ? 3 : 2) : '--';
     const formatVol = (vol: number) => vol > 0 ? vol : '--';
 
     return (
@@ -1112,7 +1184,7 @@ export const App: React.FC = () => {
               <div
                 key={`ask-${level}`}
                 className={`relative flex justify-between px-2 py-1.5 cursor-pointer rounded-sm overflow-hidden transition-all duration-75 active:scale-95 ${colors.hoverHighlight}`}
-                onClick={() => { setPriceType('LIMIT'); setPrice(ask[0].toFixed(2)); }}
+                onClick={() => { setPriceType('LIMIT'); setPrice(ask[0].toFixed(isReverseRepo(symbol) ? 3 : 2)); }}
               >
                 <div className="absolute top-0 bottom-0 right-0 bg-blue-500/10" style={{ width: `${width}%` }} />
                 <span className={`relative z-10 w-8 ${colors.textMuted} opacity-70`}>卖 {level}</span>
@@ -1141,7 +1213,7 @@ export const App: React.FC = () => {
               <div
                 key={`bid-${level}`}
                 className={`relative flex justify-between px-2 py-1.5 cursor-pointer rounded-sm overflow-hidden transition-all duration-75 active:scale-95 ${colors.hoverHighlight}`}
-                onClick={() => { setPriceType('LIMIT'); setPrice(bid[0].toFixed(2)); }}
+                onClick={() => { setPriceType('LIMIT'); setPrice(bid[0].toFixed(isReverseRepo(symbol) ? 3 : 2)); }}
               >
                 <div className="absolute top-0 bottom-0 right-0 bg-red-500/10" style={{ width: `${width}%` }} />
                 <span className={`relative z-10 w-8 ${colors.textMuted} opacity-70`}>买 {level}</span>
@@ -1472,10 +1544,18 @@ export const App: React.FC = () => {
                       }
                       setSymbol(val);
                       setTradeSide('SELL');
+                      setPriceType('CAGE'); // 切换到卖出模式时自动设为笼子价
                       window.electronAPI.setFocusSymbol(val);
                       const detail = await window.electronAPI.getStockDetail(val);
                       if (detail) {
                         setStockName(detail.name);
+                      }
+                      // 触发自动价格计算
+                      const tick = priceMap[val];
+                      if (tick) {
+                        const detailData = detail ? { upLimit: detail.upLimit, downLimit: detail.downLimit } : null;
+                        const autoPrice = calculateAutoPrice('CAGE', tick, 'SELL', detailData);
+                        if (autoPrice) setPrice(autoPrice);
                       }
                     }}>
                       <td className="px-2 py-1">
@@ -2101,7 +2181,16 @@ export const App: React.FC = () => {
           {/* Tabs */}
           <div className="flex p-1.5 gap-1.5 bg-gray-100 border-b border-gray-200 flex-shrink-0">
             <button
-              onClick={() => setTradeSide('BUY')}
+              onClick={() => {
+                // 切换到买入模式时，如果是逆回购代码则清空
+                if (isReverseRepo(symbol)) {
+                  setSymbol('');
+                  setStockName('');
+                  setAmountInWan('');
+                  setVolStrategy({ type: 'MANUAL', value: '' });
+                }
+                setTradeSide('BUY');
+              }}
               className={`flex-1 py-2 rounded-xl text-sm font-bold tracking-wide transition-all ${tradeSide === 'BUY' ? 'bg-white text-red-600 shadow-sm ring-1 ring-black/5' : 'text-gray-500 hover:text-gray-700'}`}
             >
               买入
@@ -2168,7 +2257,7 @@ export const App: React.FC = () => {
                   type="number"
                   value={price}
                   onChange={e => { setPrice(e.target.value); setPriceType('LIMIT'); }} // Auto switch to manual
-                  placeholder={currentPrice.toFixed(2)}
+                  placeholder={currentPrice.toFixed(isReverseRepo(symbol) ? 3 : 2)}
                   spellCheck="false"
                   autoComplete="off"
                   className={`w-full py-1.5 pl-8 pr-8 rounded-xl border-2 outline-none font-mono text-lg font-bold text-center transition-all ${priceType !== 'LIMIT' ? 'border-blue-400 bg-blue-50 text-blue-700' : colors.input} [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
@@ -2330,6 +2419,14 @@ export const App: React.FC = () => {
                 {isSubmitting && <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>}
               </button>
             </div>
+
+            {/* 逆回购模式提示 */}
+            {tradeSide === 'SELL' && isReverseRepo(symbol) && (
+              <div className="mb-1 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-lg flex items-center justify-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+                <span className="text-xs font-medium text-blue-700">逆回购 {stockName || 'R-001'} | 对价 | 10张起</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2368,7 +2465,7 @@ export const App: React.FC = () => {
               <div className="flex flex-col mr-6 flex-shrink-0">
                 {/* Price - Removed tracking-tighter for cleaner look */}
                 <div className={`text-5xl font-bold leading-none ${getPriceColor(currentPrice, preClose)}`}>
-                  {currentPrice > 0 ? currentPrice.toFixed(2) : '--.--'}
+                  {currentPrice > 0 ? currentPrice.toFixed(isReverseRepo(symbol) ? 3 : 2) : '--.--'}
                 </div>
                 {/* Change Info */}
                 <div className={`flex items-center space-x-4 mt-2 font-bold text-lg ${getPriceColor(currentPrice, preClose)}`}>
@@ -2380,17 +2477,17 @@ export const App: React.FC = () => {
               {/* Right: 3x3 Grid Info - Removed global font-mono, applied selectively */}
               <div className="flex-1 min-w-0 grid grid-cols-3 gap-y-3 gap-x-4 text-sm mt-1">
                 {/* Row 1 */}
-                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最高</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.high || 0, preClose)}`}>{currentTick?.high?.toFixed(2) || '--'}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最高</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.high || 0, preClose)}`}>{currentTick?.high?.toFixed(isReverseRepo(symbol) ? 3 : 2) || '--'}</span></div>
                 <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">市值</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.totalValue)}</span></div>
                 <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">量比</span><span className="text-red-600 font-bold font-mono">{currentTick?.volRatio || '--'}</span></div>
 
                 {/* Row 2 */}
-                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最低</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.low || 0, preClose)}`}>{currentTick?.low?.toFixed(2) || '--'}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">最低</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.low || 0, preClose)}`}>{currentTick?.low?.toFixed(isReverseRepo(symbol) ? 3 : 2) || '--'}</span></div>
                 <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">流通</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.currencyValue)}</span></div>
                 <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">换手</span><span className="text-gray-800 font-bold font-mono">{currentTick?.turnoverRate ? currentTick.turnoverRate + '%' : '--'}</span></div>
 
                 {/* Row 3 */}
-                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">今开</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.open || 0, preClose)}`}>{currentTick?.open?.toFixed(2) || '--'}</span></div>
+                <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">今开</span><span className={`font-bold font-mono ${getPriceColor(currentTick?.open || 0, preClose)}`}>{currentTick?.open?.toFixed(isReverseRepo(symbol) ? 3 : 2) || '--'}</span></div>
                 <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">市盈</span><span className="text-gray-800 font-bold font-mono">{currentTick?.pe || '--'}</span></div>
                 <div className="flex justify-between items-center border-r border-gray-200 pr-2 last:border-0"><span className="text-gray-400 font-medium">成交额</span><span className="text-gray-800 font-bold font-mono">{formatBigNum(currentTick?.amount)}</span></div>
               </div>
@@ -2452,8 +2549,8 @@ export const App: React.FC = () => {
                     {confirmOrderInfo.accounts.map((acc) => (
                       <tr key={acc.id}>
                         <td className="px-3 py-2 font-mono text-gray-800">{acc.id}</td>
-                        <td className="px-3 py-2 text-right font-mono">{acc.volume.toLocaleString()}股</td>
-                        <td className="px-3 py-2 text-right font-mono">{acc.amount.toLocaleString()}元</td>
+                        <td className="px-3 py-2 text-right font-mono">{acc.volume.toLocaleString()}{isReverseRepo(confirmOrderInfo.symbol) ? '张' : '股'}</td>
+                        <td className="px-3 py-2 text-right font-mono">{isReverseRepo(confirmOrderInfo.symbol) ? (acc.volume * 100).toLocaleString() : acc.amount.toLocaleString()}元</td>
                       </tr>
                     ))}
                   </tbody>
@@ -2474,7 +2571,7 @@ export const App: React.FC = () => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">价格</span>
-                  <span className="font-mono">{confirmOrderInfo.price.toFixed(2)}元</span>
+                  <span className="font-mono">{confirmOrderInfo.price.toFixed(isReverseRepo(confirmOrderInfo.symbol) ? 3 : 2)}元</span>
                 </div>
               </div>
 
