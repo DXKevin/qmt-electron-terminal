@@ -2,8 +2,8 @@
   "name": "qmt-electron-terminal",
   "private": true,
   "version": "1.0.0",
-  "description": "QMT交易终端",
-  "author": "QMT Pro",
+  "description": "QMTerminal",
+  "author": "LE",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "vite",
@@ -38,23 +38,17 @@
   },
   "build": {
     "appId": "com.qmtpro.terminal",
-    "productName": "QMT交易终端",
+    "productName": "QMTerminal",
+    "win": {
+      "target": "portable",
+      "artifactName": "QMTerminal.exe"
+    },
     "directories": {
-      "output": "dist-build"
+      "output": "bin"
     },
     "files": [
       "dist/**/*",
       "dist-electron/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "qmtpropy",
-        "to": "qmtpropy"
-      }
-    ],
-    "win": {
-      "target": "portable",
-      "artifactName": "QMT交易终端.exe"
-    }
+    ]
   }
 }

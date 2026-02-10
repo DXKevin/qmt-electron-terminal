@@ -1,0 +1,13 @@
+directories:
+  output: bin
+  buildResources: build
+appId: com.qmtpro.terminal
+productName: QMTerminal
+win:
+  target: portable
+  artifactName: QMTerminal.exe
+files:
+  - filter:
+      - dist/**/*
+      - dist-electron/**/*
+electronVersion: 25.9.8
