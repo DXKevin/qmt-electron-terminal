@@ -43,7 +43,7 @@ const AnimatedNumber: React.FC<{ value: number; format?: (v: number) => string; 
   return <span className={className}>{format(displayValue)}</span>;
 };
 
-type TabType = 'assets' | 'trade' | 'orders' | 'trades' | 'settings';
+type TabType = 'assets' | 'trade' | 'orders' | 'trades' | 'settings' | 'monitor';
 type SortDirection = 'asc' | 'desc';
 // Removed LIMIT_UP and LIMIT_DOWN from PriceMode as they are now static fills
 type PriceMode = 'LIMIT' | 'BEST_5' | 'OPPOSITE' | 'CAGE';
@@ -84,7 +84,9 @@ const Icons = {
   // UI: Panel Collapse (Double Chevron Left)
   PanelCollapse: () => <path strokeLinecap="round" strokeLinejoin="round" d="M18.75 19.5l-7.5-7.5 7.5-7.5m-6 15L5.25 12l7.5-7.5" />,
   // UI: Panel Expand (Double Chevron Right)
-  PanelExpand: () => <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 4.5l7.5 7.5-7.5 7.5m-6-15l7.5 7.5-7.5 7.5" />
+  PanelExpand: () => <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 4.5l7.5 7.5-7.5 7.5m-6-15l7.5 7.5-7.5 7.5" />,
+  // Monitor: Screen/Monitor icon for stock monitoring
+  Monitor: () => <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 006 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0118 16.5h-2.25m-7.5 0h7.5m-7.5 0l-1 3m8.5-3l1 3m0 0l.5 1.5m-.5-1.5h-9.5m0 0l-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6" />
 }
 
 // ----------------------------------------------------------------
@@ -833,8 +835,19 @@ export const App: React.FC = () => {
           // 手动输入张数
           finalVolume = parseInt(volStrategy.value) || 0;
           finalVolume = Math.floor(finalVolume / 10) * 10;  // 确保10的倍数
+        } else if (volStrategy.type === 'RATIO') {
+          // 预设仓位模式
+          const ratio = volStrategy.value;
+          const accData = assetsMap[accId];
+          if (accData) {
+            // 直接计算张数：资金(元) × 比例 ÷ 每张面值(100元)
+            const targetZhang = Math.floor((accData.cash * ratio) / 100);
+            // 确保最少10张（1000元）
+            if (targetZhang >= 10) {
+              finalVolume = Math.floor(targetZhang / 10) * 10;
+            }
+          }
         }
-        // RATIO模式在下面的else分支统一处理
       } else if (volStrategy.type === 'AMOUNT') {
         finalVolume = calculateVolumeFromAmount(volStrategy.value, p);
       } else if (volStrategy.type === 'MANUAL') {
@@ -2571,7 +2584,10 @@ export const App: React.FC = () => {
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">价格</span>
-                  <span className="font-mono">{confirmOrderInfo.price.toFixed(isReverseRepo(confirmOrderInfo.symbol) ? 3 : 2)}元</span>
+                  <span className="font-mono">
+                    {confirmOrderInfo.price.toFixed(isReverseRepo(confirmOrderInfo.symbol) ? 3 : 2)}
+                    {isReverseRepo(confirmOrderInfo.symbol) ? '%' : '元'}
+                  </span>
                 </div>
               </div>
 
@@ -2654,7 +2670,7 @@ export const App: React.FC = () => {
 
       {/* Navigation Sidebar */}
       <div
-        className={`flex flex-col py-6 ${colors.sidebarBg} z-20 transition-all duration-300 ease-in-out relative ${isSidebarOpen ? 'w-56' : 'w-20 items-center'} app-drag-region`}
+        className={`flex flex-col py-6 ${colors.sidebarBg} z-20 transition-all duration-300 ease-in-out relative ${isSidebarOpen ? 'w-48' : 'w-20 items-center'} app-drag-region`}
       >
         {/* Logo */}
         <div className={`flex items-center mb-8 px-4 ${isSidebarOpen ? 'justify-start space-x-3' : 'justify-center'} no-drag`}>
@@ -2676,6 +2692,7 @@ export const App: React.FC = () => {
             { id: 'trade', label: '交易下单', Icon: Icons.Trade },
             { id: 'orders', label: '委托查询', Icon: Icons.Orders },
             { id: 'trades', label: '成交查询', Icon: Icons.Trades },
+            { id: 'monitor', label: '股票监控', Icon: Icons.Monitor },
           ].map(item => (
             <div
               key={item.id}
@@ -2806,6 +2823,11 @@ export const App: React.FC = () => {
         {activeTab === 'orders' && renderOrders()}
         {activeTab === 'trades' && renderTradesPage()}
         {activeTab === 'settings' && renderSettings()}
+        {activeTab === 'monitor' && (
+          <div className="h-full w-full bg-white">
+            <webview src="http://120.55.74.67:3001" style={{ width: '100%', height: '100%' }} allowpopups />
+          </div>
+        )}
 
         {/* Toast Notification - Top Right */}
         {currentToast && (

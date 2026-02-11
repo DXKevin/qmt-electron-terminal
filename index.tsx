@@ -111,8 +111,6 @@ if (!window.electronAPI) {
           open: 5.06,
           high: 5.07,
           low: 4.88,
-          limitUp: parseFloat((preClose * 1.1).toFixed(2)),
-          limitDown: parseFloat((preClose * 0.9).toFixed(2)),
           amount: 1853000000,
           totalValue: 58222000000,
           currencyValue: 47416000000,

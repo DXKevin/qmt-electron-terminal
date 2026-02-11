@@ -75,9 +75,9 @@ function startAssetPolling() {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1660,
-    height: 1300,
-    minWidth: 1200,
+    width: 1500,
+    height: 900,
+    minWidth: 800,
     minHeight: 800,
     backgroundColor: '#111827',
     frame: false,
@@ -85,6 +85,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      webviewTag: true,
     },
   });
 
