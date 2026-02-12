@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setFocusSymbol: (symbol: string) => ipcRenderer.send('trade:set-focus', symbol),
   getTickSnapshot: (symbol: string) => ipcRenderer.invoke('trade:get-tick', symbol),
   getStockDetail: (symbol: string) => ipcRenderer.invoke('trade:get-stock-detail', symbol),
+  searchStocks: (query: string, limit?: number) => ipcRenderer.invoke('trade:search-stocks', query, limit),
   getCachedAccounts: () => ipcRenderer.invoke('trade:get-cached-accounts'),
   queryPositionsSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-positions-snapshot', accountIds),
   queryOrdersSnapshot: (accountIds?: string[]) => ipcRenderer.invoke('trade:query-orders-snapshot', accountIds),

@@ -159,6 +159,9 @@ if (!window.electronAPI) {
     getStockDetail: async (_symbol) => {
       return null;
     },
+    searchStocks: async (_query, _limit) => {
+      return [];
+    },
 
     getCachedAccounts: async () => {
       return [];

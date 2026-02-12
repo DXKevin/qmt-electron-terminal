@@ -259,6 +259,7 @@ function createWindow() {
       stockDetailMap.set(symbol, {
         symbol,
         name: si.InstrumentName,
+        nameInitials: si.InstrumentNameInitials,
         upLimit: si.UpStopPrice,
         downLimit: si.DownStopPrice
       });
@@ -502,6 +503,49 @@ function createWindow() {
   // 9. Stock Details
   ipcMain.handle('trade:get-stock-detail', (_, symbol: string) => {
     return stockDetailMap.get(symbol) || null;
+  });
+
+  // 10. Search Stocks (fuzzy match by code, name, or pinyin initials)
+  ipcMain.handle('trade:search-stocks', (_, query: string, limit: number = 10) => {
+    if (!query || query.length < 2) return [];
+    
+    const results: any[] = [];
+    const lowerQuery = query.toLowerCase();
+    const isNumericQuery = /^\d+$/.test(query);
+    const isAlphaQuery = /^[a-zA-Z]+$/.test(query);
+    
+    for (const [symbol, detail] of stockDetailMap.entries()) {
+      if (results.length >= limit) break;
+      
+      const code = symbol.split('.')[0] || '';
+      const name = detail?.name || '';
+      const nameInitials = detail?.nameInitials || '';
+      
+      // 匹配规则：
+      // - 数字查询：只匹配代码开头
+      // - 字母查询：只匹配拼音首字母开头
+      // - 其他查询：匹配代码开头或名称包含
+      let matches = false;
+      if (isNumericQuery) {
+        matches = code.toLowerCase().startsWith(lowerQuery);
+      } else if (isAlphaQuery) {
+        matches = nameInitials.toLowerCase().startsWith(lowerQuery);
+      } else {
+        matches = code.toLowerCase().startsWith(lowerQuery) || 
+                  name.toLowerCase().includes(lowerQuery);
+      }
+      
+      if (matches) {
+        results.push({
+          symbol,
+          name,
+          upLimit: detail?.upLimit || 0,
+          downLimit: detail?.downLimit || 0
+        });
+      }
+    }
+  
+    return results;
   });
 
   // Window Control Handlers

@@ -36,6 +36,7 @@ export interface TickData {
 export interface StockDetail {
   symbol: string;
   name: string;
+  nameInitials: string;
   upLimit: number;
   downLimit: number;
 }
@@ -133,6 +134,7 @@ export interface IElectronAPI {
   onOrdersSnapshot: (callback: (orders: OrderStatus[]) => void) => () => void;
   onTradesSnapshot: (callback: (trades: Trade[]) => void) => () => void;
   getStockDetail: (symbol: string) => Promise<StockDetail | null>;
+  searchStocks: (query: string, limit?: number) => Promise<StockDetail[]>;
   getCachedAccounts: () => Promise<any[]>;
   queryPositionsSnapshot: (accountIds?: string[]) => Promise<void>;
   queryOrdersSnapshot: (accountIds?: string[]) => Promise<void>;
