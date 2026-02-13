@@ -962,7 +962,13 @@ export const App: React.FC = () => {
           const accData = assetsMap[accId];
           if (accData && p > 0) {
             const targetCash = accData.cash * ratio;
-            finalVolume = Math.floor((targetCash / p) / 100) * 100;
+            if (isConvertibleBond(symbol)) {
+              // 可转债买入：10的倍数
+              finalVolume = Math.floor((targetCash / p) / 10) * 10;
+            } else {
+              // 股票买入：100的倍数
+              finalVolume = Math.floor((targetCash / p) / 100) * 100;
+            }
           }
         } else if (isReverseRepo(symbol)) {
           // 逆回购卖出：根据资金比例计算张数（1张=100元，最少10张）
@@ -976,9 +982,29 @@ export const App: React.FC = () => {
             }
           }
         } else {
+          // 股票/可转债卖出：处理零股（零股必须一次性全部卖出）
           const pos = positions.find(po => po.accountId === accId && po.symbol === symbol);
           if (pos) {
-            finalVolume = Math.floor((pos.canUseVolume * ratio) / 100) * 100;
+            const isBond = isConvertibleBond(symbol);
+            const lotSize = isBond ? 10 : 100;  // 一手数量：可转债10张，股票100股
+            const canUseVolume = pos.canUseVolume;
+
+            // 计算可用持仓的零股
+            const availableRemainder = canUseVolume % lotSize;
+
+            // 按仓位比例计算目标卖出数量
+            let targetVolume = Math.floor(canUseVolume * ratio);
+
+            // 计算目标零股
+            const targetRemainder = targetVolume % lotSize;
+
+            // 验证：目标零股必须 ≤ 可用零股，否则向下取整修正
+            if (targetRemainder > availableRemainder) {
+              // 策略A：向下取整到最近的整手，放弃零股部分
+              targetVolume = Math.floor(targetVolume / lotSize) * lotSize;
+            }
+
+            finalVolume = targetVolume;
           }
         }
       }
