@@ -1241,6 +1241,12 @@ export const App: React.FC = () => {
   const change = currentPrice - preClose;
   const changePercent = preClose > 0 ? (change / preClose) * 100 : 0;
 
+  // 输入价格对应的涨跌幅
+  const inputPrice = parseFloat(price) || 0;
+  const inputChangePercent = preClose > 0 && inputPrice > 0 
+    ? ((inputPrice - preClose) / preClose) * 100 
+    : null;
+
   const detail = stockDetails[symbol];
   const apiLimitUp = detail?.upLimit;
   const apiLimitDown = detail?.downLimit;
@@ -2416,26 +2422,36 @@ export const App: React.FC = () => {
                 ))}
               </div>
 
-              {/* Price Input Wrapper */}
-              <div className="relative">
+              {/* Price Input Wrapper - 统一边框和圆角 */}
+              <div className={`relative flex items-center border-2 rounded-xl transition-all ${priceType !== 'LIMIT' ? 'border-blue-400 bg-blue-50' : colors.border}`}>
                 <button
                   onClick={() => handlePriceAdjust(-1)}
-                  className={`absolute left-0 top-0 bottom-0 w-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-l-xl transition-colors`}
+                  className="flex-shrink-0 h-9 w-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors rounded-l-lg"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 12H4" /></svg>
                 </button>
-                <input
-                  type="number"
-                  value={price}
-                  onChange={e => { setPrice(e.target.value); setPriceType('LIMIT'); }} // Auto switch to manual
-                  placeholder={currentPrice.toFixed(getPriceDecimals(symbol))}
-                  spellCheck="false"
-                  autoComplete="off"
-                  className={`w-full py-1.5 pl-8 pr-8 rounded-xl border-2 outline-none font-mono text-lg font-bold text-center transition-all ${priceType !== 'LIMIT' ? 'border-blue-400 bg-blue-50 text-blue-700' : colors.input} [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
-                />
+                <div className="relative flex-1">
+                  <input
+                    type="number"
+                    value={price}
+                    onChange={e => { setPrice(e.target.value); setPriceType('LIMIT'); }} // Auto switch to manual
+                    placeholder={currentPrice.toFixed(getPriceDecimals(symbol))}
+                    spellCheck="false"
+                    autoComplete="off"
+                    className={`w-full py-1.5 pr-16 border-0 outline-none bg-transparent font-mono text-lg font-bold text-center transition-all [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${priceType !== 'LIMIT' ? 'text-blue-700' : 'text-gray-900'}`}
+                  />
+                  {/* 涨跌幅显示在输入框内部右侧 */}
+                  {inputChangePercent !== null && !isNaN(inputChangePercent) && (
+                    <div className="absolute right-2 top-1/2 -translate-y-[58%] pointer-events-none">
+                      <span className={`font-mono text-xs font-bold ${inputChangePercent >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+                        ({inputChangePercent >= 0 ? '+' : ''}{inputChangePercent.toFixed(2)}%)
+                      </span>
+                    </div>
+                  )}
+                </div>
                 <button
                   onClick={() => handlePriceAdjust(1)}
-                  className={`absolute right-0 top-0 bottom-0 w-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-r-xl transition-colors`}
+                  className="flex-shrink-0 h-9 w-8 flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors rounded-r-lg"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg>
                 </button>
