@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { TickData, AccountInfo, OrderRequest, OrderStatus, Position, Trade, MultiAccountInfo, StockDetail } from './types';
+import packageJson from './package.json';
 
 // ----------------------------------------------------------------------
 // TYPES & CONSTANTS
@@ -46,7 +47,7 @@ const AnimatedNumber: React.FC<{ value: number; format?: (v: number) => string; 
 type TabType = 'assets' | 'trade' | 'orders' | 'trades' | 'settings' | 'monitor';
 type SortDirection = 'asc' | 'desc';
 // Removed LIMIT_UP and LIMIT_DOWN from PriceMode as they are now static fills
-type PriceMode = 'LIMIT' | 'BEST_5' | 'OPPOSITE' | 'CAGE';
+type PriceMode = 'LIMIT' | 'BEST_5' | 'OPPOSITE' | 'CAGE' | 'CUSTOM_RATIO';
 
 const STOCK_MAP: Record<string, string> = {};
 
@@ -136,6 +137,8 @@ type VolumeStrategy =
 const DEFAULT_BUY_PRESETS = [10, 15, 20, 25, 30, 60, 80, 100];
 const DEFAULT_SELL_PRESETS = [10, 15, 20, 25, 30, 60, 80, 100];
 const SETTINGS_STORAGE_KEY = 'qmt-trade-settings';
+const DEFAULT_CUSTOM_PRICE_RATIO = 1.5;
+const APP_VERSION = packageJson.version;
 
 export const App: React.FC = () => {
   // Data State
@@ -184,7 +187,7 @@ export const App: React.FC = () => {
   const [amountInWan, setAmountInWan] = useState<string>('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [priceType, setPriceType] = useState<PriceMode>('CAGE');
+  const [priceType, setPriceType] = useState<PriceMode>('CUSTOM_RATIO');
 
   // Settings State
   const [tempBuyPresets, setTempBuyPresets] = useState<number[]>(DEFAULT_BUY_PRESETS);
@@ -193,6 +196,8 @@ export const App: React.FC = () => {
   const [sellPresets, setSellPresets] = useState<number[]>(DEFAULT_SELL_PRESETS);
   const [tempVolumeStep, setTempVolumeStep] = useState<number>(100);
   const [volumeStep, setVolumeStep] = useState<number>(100);
+  const [tempCustomPriceRatio, setTempCustomPriceRatio] = useState<number>(DEFAULT_CUSTOM_PRICE_RATIO);
+  const [customPriceRatio, setCustomPriceRatio] = useState<number>(DEFAULT_CUSTOM_PRICE_RATIO);
   const [tempAccountRemarks, setTempAccountRemarks] = useState<Record<string, string>>({});
   const [accountRemarks, setAccountRemarks] = useState<Record<string, string>>({});
 
@@ -304,6 +309,10 @@ export const App: React.FC = () => {
         if (parsed.volumeStep && parsed.volumeStep > 0) {
           setVolumeStep(parsed.volumeStep);
           setTempVolumeStep(parsed.volumeStep);
+        }
+        if (parsed.customPriceRatio && parsed.customPriceRatio > 0) {
+          setCustomPriceRatio(parsed.customPriceRatio);
+          setTempCustomPriceRatio(parsed.customPriceRatio);
         }
         if (parsed.accountRemarks) {
           setAccountRemarks(parsed.accountRemarks);
@@ -572,7 +581,7 @@ export const App: React.FC = () => {
         setPrice(calcPrice);
       }
     });
-  }, [priceMap, priceType, tradeSide, symbol]);
+  }, [priceMap, priceType, tradeSide, symbol, customPriceRatio]);
 
   // 价格变化时同步更新 AMOUNT 模式的 label
   useEffect(() => {
@@ -620,6 +629,8 @@ export const App: React.FC = () => {
     const symbol = tick.symbol || '';
     // 判断是否为科创板股票（68开头）
     const isKeChuang = symbol.startsWith('68');
+    const ratioMultiplier = 1 + (customPriceRatio / 100);
+    const inverseRatioMultiplier = 1 - (customPriceRatio / 100);
     let target = 0;
 
     if (side === 'BUY') {
@@ -641,6 +652,17 @@ export const App: React.FC = () => {
             target = Math.max(buyPrice2Percent, curPrice + 0.10); // 普通股票：使用max规则
           }
           // 如果有涨停价限制，取较小值
+          if (detail?.upLimit) {
+            target = Math.min(target, detail.upLimit);
+          }
+          break;
+        case 'CUSTOM_RATIO':
+          const customBuyPrice = Math.floor(curPrice * ratioMultiplier * 100) / 100;
+          if (isKeChuang) {
+            target = customBuyPrice;
+          } else {
+            target = Math.max(customBuyPrice, curPrice + 0.10);
+          }
           if (detail?.upLimit) {
             target = Math.min(target, detail.upLimit);
           }
@@ -671,6 +693,17 @@ export const App: React.FC = () => {
             target = Math.max(target, detail.downLimit);
           }
           break;
+        case 'CUSTOM_RATIO':
+          const customSellPrice = Math.ceil(curPrice * inverseRatioMultiplier * 100) / 100;
+          if (isKeChuang) {
+            target = customSellPrice;
+          } else {
+            target = Math.min(customSellPrice, curPrice - 0.10);
+          }
+          if (detail?.downLimit) {
+            target = Math.max(target, detail.downLimit);
+          }
+          break;
         default: return null;
       }
     }
@@ -697,17 +730,17 @@ export const App: React.FC = () => {
       // 上海：6(股票)、11(转债)
       else if (val.startsWith('6') || val.startsWith('11')) {
         val += '.SH';
-        setPriceType('CAGE');
+        setPriceType('CUSTOM_RATIO');
       }
       // 深圳：0(主板)、3(创业)、12(转债)
       else if (val.startsWith('0') || val.startsWith('3') || val.startsWith('12')) {
         val += '.SZ';
-        setPriceType('CAGE');
+        setPriceType('CUSTOM_RATIO');
       }
       // 北交所：4、8、9
       else if (val.startsWith('4') || val.startsWith('8') || val.startsWith('9')) {
         val += '.BJ';
-        setPriceType('CAGE');
+        setPriceType('CUSTOM_RATIO');
       }
     }
 
@@ -758,7 +791,7 @@ export const App: React.FC = () => {
       setTradeSide('SELL');
       setPriceType('OPPOSITE');
     } else {
-      setPriceType('CAGE');
+      setPriceType('CUSTOM_RATIO');
     }
   };
 
@@ -1692,7 +1725,7 @@ export const App: React.FC = () => {
                       }
                       setSymbol(val);
                       setTradeSide('SELL');
-                      setPriceType('CAGE'); // 切换到卖出模式时自动设为笼子价
+                      setPriceType('CUSTOM_RATIO'); // 切换到卖出模式时自动设为比例价
                       window.electronAPI.setFocusSymbol(val);
                       const detail = await window.electronAPI.getStockDetail(val);
                       if (detail) {
@@ -1702,7 +1735,7 @@ export const App: React.FC = () => {
                       const tick = priceMap[val];
                       if (tick) {
                         const detailData = detail ? { upLimit: detail.upLimit, downLimit: detail.downLimit } : null;
-                        const autoPrice = calculateAutoPrice('CAGE', tick, 'SELL', detailData);
+                        const autoPrice = calculateAutoPrice('CUSTOM_RATIO', tick, 'SELL', detailData);
                         if (autoPrice) setPrice(autoPrice);
                       }
                     }}>
@@ -2261,6 +2294,28 @@ export const App: React.FC = () => {
             </div>
           </div>
 
+          <div className="mb-8">
+            <div className="text-sm font-bold text-gray-700 mb-3">买卖价格上下浮动比例 (%)</div>
+            <div className="w-32">
+              <input
+                type="number"
+                min="0.1"
+                max="20"
+                step="0.1"
+                value={tempCustomPriceRatio}
+                onChange={(e) => {
+                  const val = Math.min(20, Math.max(0.1, parseFloat(e.target.value) || DEFAULT_CUSTOM_PRICE_RATIO));
+                  setTempCustomPriceRatio(Number(val.toFixed(1)));
+                }}
+                className="w-full py-2 px-3 rounded-lg border border-gray-300 text-center font-mono text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none"
+                placeholder="1.5"
+              />
+            </div>
+            <div className="text-xs text-gray-500 mt-2">
+              用于自定义价格模式, 默认1.5%.
+            </div>
+          </div>
+
           {/* Account Remarks */}
           <div className="mb-8">
             <div className="text-sm font-bold text-gray-700 mb-3">账户备注</div>
@@ -2294,11 +2349,13 @@ export const App: React.FC = () => {
                 setBuyPresets(tempBuyPresets);
                 setSellPresets(tempSellPresets);
                 setVolumeStep(tempVolumeStep);
+                setCustomPriceRatio(tempCustomPriceRatio);
                 setAccountRemarks(tempAccountRemarks);
                 localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
                   buyPresets: tempBuyPresets,
                   sellPresets: tempSellPresets,
                   volumeStep: tempVolumeStep,
+                  customPriceRatio: tempCustomPriceRatio,
                   accountRemarks: tempAccountRemarks
                 }));
               }}
@@ -2410,7 +2467,8 @@ export const App: React.FC = () => {
                 {[
                   { id: 'BEST_5', label: '五档' },
                   { id: 'OPPOSITE', label: '对价' },
-                  { id: 'CAGE', label: '笼子' }
+                  { id: 'CAGE', label: '笼子' },
+                  { id: 'CUSTOM_RATIO', label: `自定` }
                 ].map((type) => (
                   <button
                     key={type.id}
@@ -2854,7 +2912,7 @@ export const App: React.FC = () => {
           {isSidebarOpen && (
             <div className="flex flex-col overflow-hidden whitespace-nowrap">
               <span className="font-black text-lg text-gray-800 tracking-tight leading-none">QMT <span className="text-blue-600">PRO</span></span>
-              <span className="text-[10px] font-bold text-gray-400 tracking-wider">TERMINAL v2.0</span>
+              {/* <span className="text-[10px] font-bold text-gray-400 tracking-wider">{`TERMINAL v${APP_VERSION}`}</span> */}
             </div>
           )}
         </div>
@@ -2895,6 +2953,9 @@ export const App: React.FC = () => {
             onClick={() => {
               setTempBuyPresets(buyPresets);
               setTempSellPresets(sellPresets);
+              setTempVolumeStep(volumeStep);
+              setTempCustomPriceRatio(customPriceRatio);
+              setTempAccountRemarks(accountRemarks);
               setActiveTab('settings');
             }}
             className={`flex items-center p-3 rounded-xl cursor-pointer transition-all duration-200 group whitespace-nowrap overflow-hidden
@@ -2917,8 +2978,16 @@ export const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Sidebar Toggle Button */}
-        <div className="px-3 mt-auto no-drag">
+        {/* Version + Sidebar Toggle */}
+        <div className="px-3 mt-auto no-drag overflow-hidden">
+          <div className={`mb-3 text-center overflow-hidden ${isSidebarOpen ? 'px-2' : ''}`}>
+            <div className="text-[10px] font-semibold uppercase tracking-[0.2em] text-gray-400 whitespace-nowrap">
+              {isSidebarOpen ? 'Version' : 'v'}
+            </div>
+            <div className={`mt-1 font-mono text-gray-500 whitespace-nowrap overflow-hidden ${isSidebarOpen ? 'text-xs' : 'text-[10px]'}`}>
+              {isSidebarOpen ? `v${APP_VERSION}` : ''}
+            </div>
+          </div>
           <button
             onClick={() => setSidebarOpen(!isSidebarOpen)}
             className="w-full flex items-center justify-center p-2 rounded-xl text-gray-500 hover:text-blue-600 hover:bg-blue-50 border border-gray-200 hover:border-blue-200 transition-all shadow-sm"
