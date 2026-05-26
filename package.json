@@ -1,7 +1,7 @@
 {
   "name": "qmt-electron-terminal",
   "private": true,
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "QMTerminal",
   "author": "LE",
   "main": "dist-electron/electron/main.js",

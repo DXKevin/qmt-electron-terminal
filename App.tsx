@@ -52,7 +52,7 @@ type PriceMode = 'LIMIT' | 'BEST_5' | 'OPPOSITE' | 'CAGE' | 'CUSTOM_RATIO';
 const STOCK_MAP: Record<string, string> = {};
 
 // 逆回购代码固定列表
-const REVERSE_REPO_CODES = ['131810.SZ'];
+const REVERSE_REPO_CODES = ['131810.SZ', '204001.SH'];
 
 // 判断是否为逆回购代码
 const isReverseRepo = (symbol: string) => {
